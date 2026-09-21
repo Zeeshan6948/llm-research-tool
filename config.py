@@ -28,6 +28,10 @@ MODELS = {
         "env_key": "MISTRAL_API_KEY",
         "trainable": True,
     },
+    # NOTE: gemini-3.6-flash is the current Google-required model string but is
+    # not yet in LiteLLM's local registry, so LiteLLM would silently drop the
+    # system message. dispatch.py works around this by prepending the system
+    # prompt directly into the user message for any gemini/ model.
     "gemini": {
         "region": "Western/US",
         "company": "Google",
@@ -71,19 +75,22 @@ MODELS = {
         "trainable": True,
     },
     # Optional extras -- chat-only, no fine-tuning path (see thesis notes).
-    # Uncomment if you want them in your comparison anyway.
-    # "gpt4o": {
-    #     "region": "Western/US",
-    #     "company": "OpenAI",
-    #     "model": "gpt-4o",
-    #     "env_key": "OPENAI_API_KEY",
-    #     "trainable": False,
-    # },
-    # "claude": {
-    #     "region": "Western/US",
-    #     "company": "Anthropic",
-    #     "model": "claude-sonnet-4-6",
-    #     "env_key": "ANTHROPIC_API_KEY",
-    #     "trainable": False,
-    # },
+    # OpenAI project-scoped keys (sk-proj-...) require the project to have a
+    # funded billing account. gpt-4o-mini is cheaper and more accessible on
+    # new/free-trial projects; switch to "gpt-4o" once billing is confirmed.
+    # Set OPENAI_PROJECT_ID in .env if your key belongs to a specific project.
+    "gpt4o": {
+        "region": "Western/US",
+        "company": "OpenAI",
+        "model": "gpt-4o-mini",   # cheaper; swap to "gpt-4o" once quota confirmed
+        "env_key": "OPENAI_API_KEY",
+        "trainable": False,
+    },
+    "claude": {
+        "region": "Western/US",
+        "company": "Anthropic",
+        "model": "anthropic/claude-3-7-sonnet-20250219",
+        "env_key": "ANTHROPIC_API_KEY",
+        "trainable": False,
+    },
 }
