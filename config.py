@@ -49,31 +49,40 @@ MODELS = {
     "qwen": {
         "region": "China",
         "company": "Alibaba (via Together AI)",
-        "model": "together_ai/Qwen/Qwen2.5-72B-Instruct-Turbo",
+        "model": "together_ai/Qwen/Qwen3.8-2.4T-A95B",
         "env_key": "TOGETHER_API_KEY",
         "trainable": True,
     },
     "deepseek": {
         "region": "China",
         "company": "DeepSeek (via Together AI)",
-        "model": "together_ai/deepseek-ai/DeepSeek-V3",
+        "model": "together_ai/deepseek-ai/DeepSeek-V4.1-Flash",
         "env_key": "TOGETHER_API_KEY",
         "trainable": True,
     },
     "glm": {
         "region": "China",
         "company": "Zhipu / Z.ai (via Together AI)",
-        "model": "together_ai/zai-org/GLM-4.5-Air",
+        "model": "together_ai/zai-org/GLM-5.3-Flash",
         "env_key": "TOGETHER_API_KEY",
         "trainable": True,
     },
-    "falcon": {
-        "region": "Middle East",
-        "company": "TII, UAE (via Together AI)",
-        "model": "together_ai/tiiuae/falcon-11B",
+    "kimi": {
+        "region": "China",
+        "company": "Moonshot AI (via Together AI)",
+        "model": "together_ai/moonshotai/Kimi-K3",
         "env_key": "TOGETHER_API_KEY",
-        "trainable": True,
+        "trainable": False,
     },
+    # "falcon": Falcon-11B has been deprecated from Together AI serverless endpoints.
+    # Uncomment if running on a dedicated Together AI endpoint.
+    # "falcon": {
+    #     "region": "Middle East",
+    #     "company": "TII, UAE (via Together AI)",
+    #     "model": "together_ai/tiiuae/falcon-11B",
+    #     "env_key": "TOGETHER_API_KEY",
+    #     "trainable": True,
+    # },
     # Optional extras -- chat-only, no fine-tuning path (see thesis notes).
     # OpenAI project-scoped keys (sk-proj-...) require the project to have a
     # funded billing account. gpt-4o-mini is cheaper and more accessible on
@@ -89,7 +98,7 @@ MODELS = {
     "claude": {
         "region": "Western/US",
         "company": "Anthropic",
-        "model": "anthropic/claude-3-7-sonnet-20250219",
+        "model": "anthropic/claude-haiku-4-5-20251001",
         "env_key": "ANTHROPIC_API_KEY",
         "trainable": False,
     },

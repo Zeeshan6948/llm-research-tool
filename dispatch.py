@@ -22,6 +22,7 @@ import argparse
 import json
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
 from dotenv import load_dotenv
@@ -161,13 +162,23 @@ def _call_claude(model_id, api_key, system_prompt, prompt, temperature, max_toke
     kwargs = {
         "model": model_id,
         "max_tokens": max_tokens,
-        "temperature": temperature,
         "messages": [{"role": "user", "content": prompt}],
     }
+    if temperature is not None:
+        kwargs["temperature"] = float(temperature)
     if system_prompt:
         kwargs["system"] = system_prompt
 
-    response = client.messages.create(**kwargs)
+    try:
+        response = client.messages.create(**kwargs)
+    except TypeError as e:
+        # Fallback if an older wrapper or custom environment rejects 'temperature'
+        if "temperature" in str(e):
+            kwargs.pop("temperature", None)
+            response = client.messages.create(**kwargs)
+        else:
+            raise e
+
     return response.content[0].text
 
 
@@ -196,13 +207,25 @@ def _call_openai_compat(model_id, provider, api_key, system_prompt, prompt, temp
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": prompt})
 
+    # For Together AI models (especially reasoning/chat hybrid models like DeepSeek, Qwen, GLM),
+    # ensure sufficient tokens so that internal reasoning doesn't consume the entire budget.
+    effective_max_tokens = max_tokens
+    if provider == "together_ai":
+        effective_max_tokens = max(max_tokens, 2048)
+
     response = client.chat.completions.create(
         model=model_id,
         messages=messages,
         temperature=temperature,
-        max_tokens=max_tokens,
+        max_tokens=effective_max_tokens,
     )
-    return response.choices[0].message.content
+    choice_msg = response.choices[0].message
+    content = choice_msg.content or ""
+    # If a reasoning model exhausted its output without writing into 'content',
+    # fall back to reasoning_content so the user still gets a readable analysis.
+    if not content and hasattr(choice_msg, "reasoning_content") and choice_msg.reasoning_content:
+        content = choice_msg.reasoning_content
+    return content
 
 
 # ---------------------------------------------------------------------------
@@ -269,18 +292,33 @@ def query_model(key, entry, prompt, system_prompt, temperature, max_tokens):
 def run_dispatch(prompt, system_prompt, model_keys, temperature, max_tokens, progress_callback=None):
     """Reusable entry point (used by both the CLI and the Streamlit app).
 
-    progress_callback, if given, is called with each record as soon as it's
-    ready -- lets the Streamlit app show results streaming in one by one
-    instead of waiting for every model to finish.
+    Queries all available models in parallel using ThreadPoolExecutor.
+    As each model finishes, progress_callback is called immediately so
+    Streamlit or CLI users see progress in real time.
     """
     available = get_available_models(model_keys)
-    records = []
-    for key, entry in available.items():
-        record = query_model(key, entry, prompt, system_prompt, temperature, max_tokens)
-        records.append(record)
-        if progress_callback:
-            progress_callback(record)
-    return records, [k for k in model_keys if k not in available]
+    if not available:
+        return [], [k for k in model_keys if k not in available]
+
+    records_map = {}
+    # Use max_workers up to the number of models to query all simultaneously
+    with ThreadPoolExecutor(max_workers=min(len(available), 12)) as executor:
+        future_to_key = {
+            executor.submit(
+                query_model, key, entry, prompt, system_prompt, temperature, max_tokens
+            ): key
+            for key, entry in available.items()
+        }
+
+        for future in as_completed(future_to_key):
+            record = future.result()
+            records_map[record["model_key"]] = record
+            if progress_callback:
+                progress_callback(record)
+
+    # Maintain the original requested order in the final records list
+    ordered_records = [records_map[k] for k in available if k in records_map]
+    return ordered_records, [k for k in model_keys if k not in available]
 
 
 def main():
