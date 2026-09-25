@@ -20,6 +20,17 @@ load_dotenv()
 
 from config import MODELS  # noqa: E402
 from dispatch import run_dispatch  # noqa: E402
+from analysis import (  # noqa: E402
+    DIMENSIONS,
+    build_analysis_dataframe,
+    create_average_dimension_chart,
+    create_grouped_bar_chart,
+    create_heatmap_chart,
+    create_regional_bar_chart,
+    generate_radar_svg,
+    parse_dimension_scores,
+    parse_overall_flag,
+)
 
 st.set_page_config(page_title="Cross-Cultural LLM Comparison", layout="wide")
 
@@ -150,6 +161,7 @@ if "results" not in st.session_state:
 
 if run_clicked:
     st.session_state.results = []
+    st.session_state.show_graphs = False
     progress_area = st.empty()
     results_container = st.container()
     done = 0
@@ -180,26 +192,159 @@ if run_clicked:
 # --------------------------------------------------------------- results --
 if st.session_state.results:
     st.divider()
-    st.subheader("Results")
+
+    # Results header with global Expand / Collapse toggle
+    res_hdr_left, res_hdr_right = st.columns([3, 1])
+    with res_hdr_left:
+        st.subheader("Results")
+    with res_hdr_right:
+        expand_all = st.toggle("Expand all responses", value=False, help="Toggle to show or hide all model responses at once.")
 
     cols = st.columns(2)
     for i, record in enumerate(st.session_state.results):
         with cols[i % 2]:
             with st.container(border=True):
                 st.markdown(f"**{record['model_key']}** · {record['company']} · _{record['region']}_")
-                if record["error"]:
+                if record.get("error"):
                     st.error(record["error"])
                 else:
-                    st.write(record["response"])
+                    # Parse dimension scores for quick card preview badges
+                    scores = parse_dimension_scores(record.get("response"))
+                    flag = parse_overall_flag(record.get("response"))
+
+                    badges = []
+                    if flag is True:
+                        badges.append("🚩 :red[**FLAGGED**]")
+                    elif flag is False:
+                        badges.append("✅ :green[**CLEAR**]")
+
+                    # Highlight any dimensions with high score (>= 3)
+                    high_dims = [f"{d.split()[0]}: {s}/5" for d, s in scores.items() if s and s >= 3]
+                    if high_dims:
+                        badges.append(f"⚠️ {', '.join(high_dims)}")
+
+                    if badges:
+                        st.caption(" · ".join(badges))
+
+                    # Individual On-Click Show / Hide toggle per LLM response
+                    with st.expander("📄 Show / Hide Response", expanded=expand_all):
+                        st.markdown(record["response"])
 
     st.divider()
     df = pd.DataFrame(st.session_state.results)
     st.dataframe(df[["model_key", "region", "company", "response", "error"]], use_container_width=True)
 
     jsonl_data = "\n".join(json.dumps(r, ensure_ascii=False) for r in st.session_state.results)
-    st.download_button(
-        "Download results (JSONL)",
-        data=jsonl_data,
-        file_name=f"results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl",
-        mime="application/json",
-    )
+
+    # Action buttons: Download JSONL and new Graphical Analysis button side-by-side
+    btn_col1, btn_col2, _ = st.columns([1.2, 1.5, 2])
+    with btn_col1:
+        st.download_button(
+            "Download results (JSONL)",
+            data=jsonl_data,
+            file_name=f"results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl",
+            mime="application/json",
+            use_container_width=True,
+        )
+    with btn_col2:
+        graphs_open = st.session_state.get("show_graphs", False)
+        if st.button(
+            "📊 Hide Graphical Work" if graphs_open else "📊 Generate Graphical Analysis",
+            type="primary" if not graphs_open else "secondary",
+            use_container_width=True,
+        ):
+            st.session_state.show_graphs = not graphs_open
+            st.rerun()
+
+    # ------------------------------------------------ Graphical Work Section --
+    if st.session_state.get("show_graphs", False):
+        st.divider()
+        st.subheader("📊 5-Dimension Behavioral Analysis & Graphs")
+        st.caption(
+            "Visualizing LLM scores across the 5 exploitative leadership dimensions: "
+            "1. Genuine Egoistic Behaviors | 2. Taking Credit | 3. Exerting Pressure | "
+            "4. Undermining Development | 5. Manipulating (Scale: 1 Minimal → 5 Very High)"
+        )
+
+        long_df, wide_df = build_analysis_dataframe(st.session_state.results)
+
+        if long_df.empty:
+            st.warning(
+                "Could not extract dimension scores from the current model responses. "
+                "Ensure responses contain the 5-dimension evaluation table or numerical scores."
+            )
+        else:
+            # Summary Metrics Row
+            m_col1, m_col2, m_col3, m_col4 = st.columns(4)
+            with m_col1:
+                st.metric("Models Evaluated", len(wide_df))
+            with m_col2:
+                avg_score = long_df["score"].mean()
+                st.metric("Overall Avg Score", f"{avg_score:.2f} / 5.0")
+            with m_col3:
+                dim_means = long_df.groupby("dimension")["score"].mean()
+                top_dim = dim_means.idxmax()
+                st.metric("Top Flagged Dimension", top_dim, f"{dim_means.max():.2f} / 5")
+            with m_col4:
+                flagged_count = (wide_df["overall_flag"].str.contains("FLAGGED")).sum()
+                st.metric("Models Flagging Exploitative Tone", f"{flagged_count} / {len(wide_df)}")
+
+            # Model filter selection
+            available_models = sorted(long_df["model_display"].unique().tolist())
+            selected_chart_models = st.multiselect(
+                "Filter models in graphs:",
+                options=available_models,
+                default=available_models,
+                help="Select which models to compare in the graphs below.",
+            )
+
+            filtered_long_df = long_df[long_df["model_display"].isin(selected_chart_models)]
+
+            if filtered_long_df.empty:
+                st.info("Select at least one model above to display the graphs.")
+            else:
+                # Multiple specialized graph representations
+                tab1, tab2, tab3, tab4, tab5 = st.tabs([
+                    "📊 Side-by-Side Comparison",
+                    "🗺️ Dimension Heatmap",
+                    "🕸️ Radar (Spider) Profile",
+                    "🌍 Cultural Regional Comparison",
+                    "📋 Dimension Scores Table",
+                ])
+
+                with tab1:
+                    st.altair_chart(create_grouped_bar_chart(filtered_long_df), use_container_width=True)
+                    st.altair_chart(create_average_dimension_chart(filtered_long_df), use_container_width=True)
+
+                with tab2:
+                    st.altair_chart(create_heatmap_chart(filtered_long_df), use_container_width=True)
+
+                with tab3:
+                    st.markdown("##### Multi-Dimensional Behavioral Radar Profile")
+                    st.caption("Each vertex represents one of the 5 behavioral dimensions (scale 1 to 5).")
+                    models_radar_data = []
+                    for model_name in selected_chart_models:
+                        sub = filtered_long_df[filtered_long_df["model_display"] == model_name]
+                        scores_dict = dict(zip(sub["dimension"], sub["score"]))
+                        models_radar_data.append({"name": model_name, "scores": scores_dict})
+                    radar_svg = generate_radar_svg(DIMENSIONS, models_radar_data)
+                    st.markdown(radar_svg, unsafe_allow_html=True)
+
+                with tab4:
+                    reg_chart = create_regional_bar_chart(filtered_long_df)
+                    if reg_chart is not None:
+                        st.altair_chart(reg_chart, use_container_width=True)
+                    else:
+                        st.info("Cultural regional comparison requires responses from models across at least two different cultural regions (e.g., Western/US vs China vs Europe).")
+
+                with tab5:
+                    st.markdown("##### Extracted Dimension Scores by Model")
+                    st.dataframe(wide_df, use_container_width=True)
+                    csv_data = wide_df.to_csv(index=False)
+                    st.download_button(
+                        "Download Extracted Scores (CSV)",
+                        data=csv_data,
+                        file_name=f"dimension_scores_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                        mime="text/csv",
+                    )
+
