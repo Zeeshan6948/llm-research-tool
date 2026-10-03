@@ -18,23 +18,77 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from config import MODELS  # noqa: E402
-from dispatch import run_dispatch  # noqa: E402
-from analysis import (  # noqa: E402
+import os
+import sys
+from pathlib import Path
+
+# Add scripts directory to sys.path so modules can be imported directly or via scripts package
+_scripts_dir = str(Path(__file__).parent / "scripts")
+if _scripts_dir not in sys.path:
+    sys.path.insert(0, _scripts_dir)
+
+from scripts.config import MODELS  # noqa: E402
+from scripts.dispatch import run_dispatch  # noqa: E402
+from scripts.analysis import (  # noqa: E402
     DIMENSIONS,
     build_analysis_dataframe,
     create_average_dimension_chart,
     create_grouped_bar_chart,
     create_heatmap_chart,
     create_regional_bar_chart,
+    create_total_score_bar_chart,
     generate_radar_svg,
     parse_dimension_scores,
     parse_overall_flag,
 )
 
-st.set_page_config(page_title="Cross-Cultural LLM Comparison", layout="wide")
+LOGO_PATH = "logo.png"
 
+st.set_page_config(
+    page_title="Cross-Cultural LLM Comparison",
+    page_icon=LOGO_PATH if os.path.exists(LOGO_PATH) else None,
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+# Hide Streamlit Deploy button, top-right three dots menu, and footer
+st.markdown(
+    """
+    <style>
+    /* Enlarge Streamlit logo beyond native limits */
+    [data-testid="stLogo"] {
+        height: 6rem !important;
+        max-height: 100% !important;
+        width: auto !important;
+    }
+    [data-testid="stLogo"] img {
+        height: 6rem !important;
+        max-height: 100% !important;
+        width: auto !important;
+    }
+    /* Hide Streamlit Deploy button */
+    .stDeployButton, [data-testid="stDeployButton"] {
+        display: none !important;
+    }
+    /* Hide top-right three dots menu (hamburger) */
+    #MainMenu, [data-testid="stMainMenu"], [data-testid="stToolbarActions"] {
+        visibility: hidden !important;
+        display: none !important;
+    }
+    /* Hide footer */
+    footer {
+        visibility: hidden !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+# Display application logo
+if os.path.exists(LOGO_PATH):
+    st.sidebar.image(LOGO_PATH, width=220)
 st.title("Cross-cultural LLM comparison")
+
 st.caption(
     "Send one prompt to multiple LLMs and compare how each interprets it. "
     "Built for the exploitative-leadership cross-cultural bias study."
@@ -197,8 +251,9 @@ if st.session_state.results:
             st.info("Select at least one model above to display the graphs.")
         else:
             # Multiple specialized graph representations
-            tab1, tab2, tab3, tab4, tab5 = st.tabs([
+            tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
                 "📊 Side-by-Side Comparison",
+                "📈 Total Score",
                 "🗺️ Dimension Heatmap",
                 "🕸️ Radar (Spider) Profile",
                 "🌍 Cultural Regional Comparison",
@@ -210,9 +265,12 @@ if st.session_state.results:
                 st.altair_chart(create_average_dimension_chart(filtered_long_df), use_container_width=True)
 
             with tab2:
-                st.altair_chart(create_heatmap_chart(filtered_long_df), use_container_width=True)
+                st.altair_chart(create_total_score_bar_chart(filtered_long_df), use_container_width=True)
 
             with tab3:
+                st.altair_chart(create_heatmap_chart(filtered_long_df), use_container_width=True)
+
+            with tab4:
                 st.markdown("##### Multi-Dimensional Behavioral Radar Profile")
                 st.caption("Each vertex represents one of the 5 behavioral dimensions (scale 1 to 5).")
                 models_radar_data = []
@@ -223,14 +281,14 @@ if st.session_state.results:
                 radar_svg = generate_radar_svg(DIMENSIONS, models_radar_data)
                 st.markdown(radar_svg, unsafe_allow_html=True)
 
-            with tab4:
+            with tab5:
                 reg_chart = create_regional_bar_chart(filtered_long_df)
                 if reg_chart is not None:
                     st.altair_chart(reg_chart, use_container_width=True)
                 else:
                     st.info("Cultural regional comparison requires responses from models across at least two different cultural regions (e.g., Western/US vs China vs Europe).")
 
-            with tab5:
+            with tab6:
                 st.markdown("##### Extracted Dimension Scores by Model")
                 st.dataframe(wide_df, use_container_width=True)
                 csv_data = wide_df.to_csv(index=False)

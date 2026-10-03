@@ -246,6 +246,47 @@ def create_grouped_bar_chart(df: pd.DataFrame) -> alt.Chart:
     return chart
 
 
+def create_total_score_bar_chart(df: pd.DataFrame) -> alt.Chart:
+    """Create a bar chart showing the sum of all 5 dimension scores per LLM."""
+    sum_df = df.groupby(["model_display", "model_key"], as_index=False)["score"].sum()
+    
+    chart = (
+        alt.Chart(sum_df)
+        .mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
+        .encode(
+            x=alt.X(
+                "model_display:N",
+                title="Model",
+                sort="-y",
+                axis=alt.Axis(labelAngle=-45, labelFontSize=12, titleFontSize=13),
+            ),
+            y=alt.Y(
+                "score:Q",
+                title="Total Score (Sum of 5 Dimensions)",
+                scale=alt.Scale(domain=[0, 25]),
+            ),
+            color=alt.Color(
+                "model_display:N",
+                legend=None,
+                scale=alt.Scale(scheme="category10"),
+            ),
+            tooltip=[
+                alt.Tooltip("model_display:N", title="Model"),
+                alt.Tooltip("score:Q", title="Total Score"),
+            ],
+        )
+        .properties(
+            title=alt.TitleParams(
+                text="Total Exploitative Severity Score per LLM",
+                subtitle="Sum of all 5 dimensions (Max 25)",
+                fontSize=16,
+            ),
+            height=400,
+        )
+    )
+    return chart
+
+
 def create_heatmap_chart(df: pd.DataFrame) -> alt.Chart:
     """Create a heatmap matrix of models vs dimensions.
 

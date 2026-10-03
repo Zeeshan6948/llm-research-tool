@@ -28,7 +28,10 @@ from datetime import datetime, timezone
 from dotenv import load_dotenv
 from tqdm import tqdm
 
-from config import MODELS
+try:
+    from config import MODELS
+except ImportError:
+    from scripts.config import MODELS
 
 load_dotenv()
 

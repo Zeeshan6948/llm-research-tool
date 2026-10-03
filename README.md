@@ -6,8 +6,9 @@ and score them on a held-out set.
 
 ## What's built so far
 
-- `config.py` -- the model registry (region, company, LiteLLM model string, API key needed)
-- `dispatch.py` -- sends one prompt to all/selected models, saves results as JSONL (CLI use)
+- `scripts/config.py` -- the model registry (region, company, LiteLLM model string, API key needed)
+- `scripts/dispatch.py` -- sends one prompt to all/selected models, saves results as JSONL (CLI use)
+- `scripts/analysis.py` -- dimension parsing and visualization generators (charts & radar)
 - `app.py` -- **web interface** (Streamlit) -- this is what you'd share with your professor
 - `data/sample_labeled_emails.jsonl` -- example of the labeled-data format you'll use for fine-tuning later
 - `.env.example` -- template for your API keys
@@ -77,22 +78,22 @@ especially if you share the link widely.
 
 Send a prompt to every configured model:
 ```bash
-python dispatch.py --prompt "A manager tells their team: 'I need everyone here until this ships tonight, no exceptions.' Is this leadership behavior exploitative? Explain your reasoning."
+python scripts/dispatch.py --prompt "A manager tells their team: 'I need everyone here until this ships tonight, no exceptions.' Is this leadership behavior exploitative? Explain your reasoning."
 ```
 
 Send to specific models only:
 ```bash
-python dispatch.py --prompt "..." --models mistral,qwen,deepseek
+python scripts/dispatch.py --prompt "..." --models mistral,qwen,deepseek
 ```
 
 Use a prompt from a file (handy once you have a folder of scenario prompts):
 ```bash
-python dispatch.py --prompt-file scenarios/scenario1.txt
+python scripts/dispatch.py --prompt-file scenarios/scenario1.txt
 ```
 
 Fix the sampling temperature for methodological consistency (default is 0.3):
 ```bash
-python dispatch.py --prompt "..." --temperature 0.0
+python scripts/dispatch.py --prompt "..." --temperature 0.0
 ```
 
 ## Output format
