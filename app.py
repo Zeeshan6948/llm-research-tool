@@ -111,8 +111,8 @@ for region, keys in regions.items():
             selected_models.append(key)
 
 st.sidebar.divider()
-temperature = st.sidebar.slider("Temperature", 0.0, 1.0, 0.3, 0.1, help="Fixed across all models for a fair comparison.")
-max_tokens = st.sidebar.slider("Max response length (tokens)", 100, 1500, 500, 50)
+temperature = 0.3
+max_tokens = 500
 
 # ------------------------------------------------------------------ main --
 system_prompt = st.text_area(
