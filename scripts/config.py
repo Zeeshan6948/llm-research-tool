@@ -20,14 +20,19 @@ versions ship. Before a real run, check the current IDs at:
 and update the strings below.
 """
 
+MODEL_SEQUENCE = [
+    "gemini",
+    "qwen",
+    "mistral",
+    "claude",
+    "gpt4o",
+    "deepseek",
+    "llama",
+    "glm",
+    "kimi",
+]
+
 MODELS = {
-    "mistral": {
-        "region": "Europe (non-US)",
-        "company": "Mistral AI",
-        "model": "mistral/open-mistral-7b",
-        "env_key": "MISTRAL_API_KEY",
-        "trainable": True,
-    },
     # NOTE: gemini-3.6-flash is the current Google-required model string but is
     # not yet in LiteLLM's local registry, so LiteLLM would silently drop the
     # system message. dispatch.py works around this by prepending the system
@@ -39,24 +44,50 @@ MODELS = {
         "env_key": "GEMINI_API_KEY",
         "trainable": True,
     },
-    "llama": {
-        "region": "Western/US",
-        "company": "Meta (via Together AI)",
-        "model": "together_ai/meta-llama/Llama-3.3-70B-Instruct-Turbo",
-        "env_key": "TOGETHER_API_KEY",
-        "trainable": True,
-    },
     "qwen": {
         "region": "China",
         "company": "Alibaba (via Together AI)",
-        "model": "together_ai/Qwen/Qwen3.8-2.4T-A95B",
+        "model": "together_ai/Qwen/Qwen3.5-9B",
         "env_key": "TOGETHER_API_KEY",
         "trainable": True,
+    },
+    "mistral": {
+        "region": "Europe (non-US)",
+        "company": "Mistral AI",
+        "model": "mistral/open-mistral-7b",
+        "env_key": "MISTRAL_API_KEY",
+        "trainable": True,
+    },
+    "claude": {
+        "region": "Western/US",
+        "company": "Anthropic",
+        "model": "anthropic/claude-haiku-4-5-20251001",
+        "env_key": "ANTHROPIC_API_KEY",
+        "trainable": False,
+    },
+    # Optional extras -- chat-only, no fine-tuning path (see thesis notes).
+    # OpenAI project-scoped keys (sk-proj-...) require the project to have a
+    # funded billing account. gpt-4o-mini is cheaper and more accessible on
+    # new/free-trial projects; switch to "gpt-4o" once billing is confirmed.
+    # Set OPENAI_PROJECT_ID in .env if your key belongs to a specific project.
+    "gpt4o": {
+        "region": "Western/US",
+        "company": "OpenAI",
+        "model": "gpt-4o-mini",   # cheaper; swap to "gpt-4o" once quota confirmed
+        "env_key": "OPENAI_API_KEY",
+        "trainable": False,
     },
     "deepseek": {
         "region": "China",
         "company": "DeepSeek (via Together AI)",
         "model": "together_ai/deepseek-ai/DeepSeek-V4.1-Flash",
+        "env_key": "TOGETHER_API_KEY",
+        "trainable": True,
+    },
+    "llama": {
+        "region": "Western/US",
+        "company": "Meta (via Together AI)",
+        "model": "together_ai/meta-models/Muse-Spark-Open-816B-A42B",
         "env_key": "TOGETHER_API_KEY",
         "trainable": True,
     },
@@ -72,34 +103,6 @@ MODELS = {
         "company": "Moonshot AI (via Together AI)",
         "model": "together_ai/moonshotai/Kimi-K3",
         "env_key": "TOGETHER_API_KEY",
-        "trainable": False,
-    },
-    # "falcon": Falcon-11B has been deprecated from Together AI serverless endpoints.
-    # Uncomment if running on a dedicated Together AI endpoint.
-    # "falcon": {
-    #     "region": "Middle East",
-    #     "company": "TII, UAE (via Together AI)",
-    #     "model": "together_ai/tiiuae/falcon-11B",
-    #     "env_key": "TOGETHER_API_KEY",
-    #     "trainable": True,
-    # },
-    # Optional extras -- chat-only, no fine-tuning path (see thesis notes).
-    # OpenAI project-scoped keys (sk-proj-...) require the project to have a
-    # funded billing account. gpt-4o-mini is cheaper and more accessible on
-    # new/free-trial projects; switch to "gpt-4o" once billing is confirmed.
-    # Set OPENAI_PROJECT_ID in .env if your key belongs to a specific project.
-    "gpt4o": {
-        "region": "Western/US",
-        "company": "OpenAI",
-        "model": "gpt-4o-mini",   # cheaper; swap to "gpt-4o" once quota confirmed
-        "env_key": "OPENAI_API_KEY",
-        "trainable": False,
-    },
-    "claude": {
-        "region": "Western/US",
-        "company": "Anthropic",
-        "model": "anthropic/claude-haiku-4-5-20251001",
-        "env_key": "ANTHROPIC_API_KEY",
         "trainable": False,
     },
 }
