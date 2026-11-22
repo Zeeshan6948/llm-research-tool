@@ -30,13 +30,15 @@ if _scripts_dir not in sys.path:
 
 import scripts.config as _scripts_config  # noqa: E402
 import scripts.analysis as _scripts_analysis  # noqa: E402
+import scripts.dispatch as _scripts_dispatch  # noqa: E402
 
-# Ensure Streamlit reruns always pick up updates to config.py / analysis.py without requiring a full restart
+# Ensure Streamlit reruns always pick up updates to scripts/ modules without requiring a full restart
 importlib.reload(_scripts_config)
 importlib.reload(_scripts_analysis)
+importlib.reload(_scripts_dispatch)
 
 from scripts.config import MODEL_SEQUENCE, MODELS  # noqa: E402
-from scripts.dispatch import run_dispatch, run_dispatch_both  # noqa: E402
+from scripts.dispatch import get_secret, run_dispatch, run_dispatch_both  # noqa: E402
 from scripts.benchmark_data import (  # noqa: E402
     assemble_system_prompt,
     detect_email_id_from_text,
@@ -226,10 +228,45 @@ st.markdown(
 )
 
 
+def _should_show_dimension_scores_table() -> bool:
+    """Show the Dimension Scores Table only when running locally (hidden on hosted deployments)."""
+    override = str(get_secret("SHOW_DIMENSION_SCORES_TABLE", "")).strip().lower()
+    if override in ("true", "1", "yes"):
+        return True
+    if override in ("false", "0", "no"):
+        return False
+
+    try:
+        headers = st.context.headers
+        host = (headers.get("Host") or headers.get("host") or "").strip().lower()
+        if host:
+            if host.startswith("["):
+                hostname = host.split("]")[0].lstrip("[")
+            else:
+                hostname = host.split(":")[0]
+            return hostname in ("localhost", "127.0.0.1", "::1", "0.0.0.0")
+    except Exception:
+        pass
+
+    if os.getenv("STREAMLIT_SHARING_MODE") or os.getenv("IS_STREAMLIT_CLOUD"):
+        return False
+    if str(Path(__file__).resolve()).startswith("/mount/src"):
+        return False
+    return True
+
+
+SHOW_DIMENSION_SCORES_TABLE = _should_show_dimension_scores_table()
+
+
 @st.dialog("🎓 Purpose of Study & How to Use", width="large")
 def show_study_intro():
+    table_bullet = (
+        "\n           - **📋 4) Dimension Scores Table:** View and download (CSV) the full table of Q1–Q15 item scores, total scores, and 5-dimension decimal scores."
+        if SHOW_DIMENSION_SCORES_TABLE
+        else ""
+    )
     st.markdown(
-        """
+        f"""
         ### 🌍 Cross-Cultural Exploitative Leadership Bias Study
         This research platform investigates how Large Language Models (LLMs) developed across different cultural and geopolitical regions (**Western/US**, **China**, and **Europe**) perceive, evaluate, and score **exploitative leadership behaviors** in workplace communication, and how **in-context expert calibration (Leave-One-Out training)** aligns model evaluations with human expert consensus.
 
@@ -253,9 +290,8 @@ def show_study_intro():
         4. **Run & Explore the Results Hierarchy:**
            - **🌍 1) Cultural Comparison:** Compare average dimension scores across cultural regions (**Western/US**, **China**, **Europe**).
            - **📈 2) Overall Comparison:** Compare each model's total exploitative severity score across all 15 scale items (out of 75).
-           - **📊 3) Dimension Comparison:** Inspect per-model 5-dimension bar charts, panel consensus rankings, and the **🗺️ Dimension Heatmap** matrix inside the same tab.
-           - **📋 4) Dimension Scores Table:** View and download (CSV) the full table of Q1–Q15 item scores, total scores, and 5-dimension decimal scores.
-           - **⚖️ Untrained vs. Trained (Leave-One-Out) vs. Expert Benchmark** *(shown in **Both Above** mode)*: Compare Baseline vs. Expert Augmented scores directly against the validated **Expert Consensus Benchmark**.
+           - **📊 3) Dimension Comparison:** Inspect per-model 5-dimension bar charts, panel consensus rankings, and the **🗺️ Dimension Heatmap** matrix inside the same tab.{table_bullet}
+           - **⚖️ Baseline vs. Expert Augmented vs. Expert Benchmark** *(shown in **Both Above** mode)*: Compare Baseline vs. Expert Augmented scores directly against the validated **Expert Consensus Benchmark**.
 
         *Click the **✕** button in the top-right corner of this window (or the button below) to open the application.*
         """
@@ -608,10 +644,11 @@ if st.session_state.results:
         ),
     )
 
+    all_modes_in_results = {r.get("execution_mode", "Untrained") for r in st.session_state.results}
     distinct_modes_in_results = {
         r.get("execution_mode", "Untrained") for r in st.session_state.results if not r.get("error")
     }
-    is_both_results = len(distinct_modes_in_results) > 1
+    is_both_results = (st.session_state.get("last_run_mode") == MODE_BOTH) or (len(all_modes_in_results) > 1)
     has_trained_results = "Trained" in distinct_modes_in_results and execution_mode != MODE_UNTRAINED
 
     active_target_eid = st.session_state.get("last_target_email_id") if has_trained_results else None
@@ -645,14 +682,15 @@ if st.session_state.results:
             trained_mean = long_df[long_df["execution_mode"] == "Trained"]["score"].mean()
             delta_mean = trained_mean - untrained_mean if pd.notna(untrained_mean) and pd.notna(trained_mean) else 0.0
             with m_col1:
-                st.metric("Evaluations Completed", f"{len(wide_df)} ({len(wide_df) // 2} Models × 2)")
+                unique_models_count = wide_df["model_key"].nunique()
+                st.metric("Evaluations Completed", f"{len(wide_df)} ({unique_models_count} Models × 2)")
             with m_col2:
-                st.metric("Untrained Avg Score", f"{untrained_mean:.2f} / 5.0" if pd.notna(untrained_mean) else "N/A")
+                st.metric("Baseline LLMs Avg Score", f"{untrained_mean:.2f} / 5.0" if pd.notna(untrained_mean) else "N/A")
             with m_col3:
                 st.metric(
-                    "Trained Avg Score",
+                    "Expert Augmented Avg Score",
                     f"{trained_mean:.2f} / 5.0" if pd.notna(trained_mean) else "N/A",
-                    delta=f"{delta_mean:+.2f} vs Untrained",
+                    delta=f"{delta_mean:+.2f} vs Baseline",
                 )
             with m_col4:
                 if active_expert_profile:
@@ -689,16 +727,36 @@ if st.session_state.results:
                     st.metric("Models Flagging Exploitative Tone", f"{flagged_count} / {len(wide_df)}")
 
         # Model filter selection (preserving canonical model sequence)
-        available_models = wide_df["model_display"].tolist()
-        selected_chart_models = st.multiselect(
-            "Filter models in graphs:",
-            options=available_models,
-            default=available_models,
-            help="Select which models to compare in the graphs below.",
-        )
+        if is_both_results:
+            available_models = list(dict.fromkeys(wide_df["base_model_display"].tolist()))
+            selected_chart_models = st.multiselect(
+                "Filter models in graphs (applies to both Baseline & Expert Augmented):",
+                options=available_models,
+                default=available_models,
+                help="Select which models to compare side-by-side below.",
+            )
+            filtered_long_df = long_df[long_df["base_model_display"].isin(selected_chart_models)]
+            filtered_wide_df = wide_df[wide_df["base_model_display"].isin(selected_chart_models)].reset_index(drop=True)
 
-        filtered_long_df = long_df[long_df["model_display"].isin(selected_chart_models)]
-        filtered_wide_df = wide_df[wide_df["model_display"].isin(selected_chart_models)].reset_index(drop=True)
+            baseline_long_df = filtered_long_df[filtered_long_df["execution_mode"] == "Untrained"].copy()
+            baseline_long_df["model_display"] = baseline_long_df["base_model_display"]
+            augmented_long_df = filtered_long_df[filtered_long_df["execution_mode"] == "Trained"].copy()
+            augmented_long_df["model_display"] = augmented_long_df["base_model_display"]
+
+            baseline_wide_df = filtered_wide_df[filtered_wide_df["execution_mode"] == "Untrained"].copy().reset_index(drop=True)
+            baseline_wide_df["model_display"] = baseline_wide_df["base_model_display"]
+            augmented_wide_df = filtered_wide_df[filtered_wide_df["execution_mode"] == "Trained"].copy().reset_index(drop=True)
+            augmented_wide_df["model_display"] = augmented_wide_df["base_model_display"]
+        else:
+            available_models = wide_df["model_display"].tolist()
+            selected_chart_models = st.multiselect(
+                "Filter models in graphs:",
+                options=available_models,
+                default=available_models,
+                help="Select which models to compare in the graphs below.",
+            )
+            filtered_long_df = long_df[long_df["model_display"].isin(selected_chart_models)]
+            filtered_wide_df = wide_df[wide_df["model_display"].isin(selected_chart_models)].reset_index(drop=True)
 
         if filtered_long_df.empty:
             st.info("Select at least one model above to display the graphs.")
@@ -707,63 +765,157 @@ if st.session_state.results:
             # 1) Cultural Comparison
             # 2) Overall Comparison
             # 3) Dimension Comparison (also has inside Dimension Heatmap)
-            # 4) Dimension Scores Table
-            # (+ Untrained vs. Trained (Leave-One-Out) vs. Expert Benchmark ONLY in Both mode)
+            # 4) Dimension Scores Table (local runs only; hidden on hosted deployments)
+            # (+ Baseline vs. Expert Augmented vs. Expert Benchmark ONLY in Both mode)
+            tab_labels = [
+                "🌍 Cultural Comparison",
+                "📈 Overall Comparison",
+                "📊 Dimension Comparison",
+            ]
+            if SHOW_DIMENSION_SCORES_TABLE:
+                tab_labels.append("📋 Dimension Scores Table")
             if is_both_results:
-                tab_cultural, tab_overall, tab_dim, tab_table, tab_both_comp = st.tabs([
-                    "🌍 Cultural Comparison",
-                    "📈 Overall Comparison",
-                    "📊 Dimension Comparison",
-                    "📋 Dimension Scores Table",
-                    "⚖️ Untrained vs. Trained (Leave-One-Out) vs. Expert Benchmark",
-                ])
-            else:
-                tab_cultural, tab_overall, tab_dim, tab_table = st.tabs([
-                    "🌍 Cultural Comparison",
-                    "📈 Overall Comparison",
-                    "📊 Dimension Comparison",
-                    "📋 Dimension Scores Table",
-                ])
+                tab_labels.append("⚖️ Baseline vs. Expert Augmented vs. Expert Benchmark")
+
+            created_tabs = st.tabs(tab_labels)
+            tab_map = dict(zip(tab_labels, created_tabs))
+            tab_cultural = tab_map["🌍 Cultural Comparison"]
+            tab_overall = tab_map["📈 Overall Comparison"]
+            tab_dim = tab_map["📊 Dimension Comparison"]
+            tab_table = tab_map.get("📋 Dimension Scores Table")
+            tab_both_comp = tab_map.get("⚖️ Baseline vs. Expert Augmented vs. Expert Benchmark")
 
             # 1) Cultural Comparison
             with tab_cultural:
-                reg_chart = create_regional_bar_chart(filtered_long_df)
-                if reg_chart is not None:
-                    st.altair_chart(reg_chart, use_container_width=True)
+                if is_both_results:
+                    c_base, c_aug = st.columns(2)
+                    with c_base:
+                        st.markdown("#### Baseline LLMs")
+                        reg_base = create_regional_bar_chart(baseline_long_df) if not baseline_long_df.empty else None
+                        if reg_base is not None:
+                            st.altair_chart(reg_base, use_container_width=True)
+                        else:
+                            st.info("Requires responses from at least two cultural regions.")
+                    with c_aug:
+                        st.markdown("#### Expert Augmented LLMs")
+                        reg_aug = create_regional_bar_chart(augmented_long_df) if not augmented_long_df.empty else None
+                        if reg_aug is not None:
+                            st.altair_chart(reg_aug, use_container_width=True)
+                        else:
+                            st.info("Requires responses from at least two cultural regions.")
                 else:
-                    st.info(
-                        "Cultural comparison requires responses from models across at least two different cultural regions "
-                        "(e.g., Western/US vs China vs Europe)."
-                    )
+                    reg_chart = create_regional_bar_chart(filtered_long_df)
+                    if reg_chart is not None:
+                        st.altair_chart(reg_chart, use_container_width=True)
+                    else:
+                        st.info(
+                            "Cultural comparison requires responses from models across at least two different cultural regions "
+                            "(e.g., Western/US vs China vs Europe)."
+                        )
 
             # 2) Overall Comparison
             with tab_overall:
-                st.altair_chart(create_total_score_bar_chart(filtered_wide_df), use_container_width=True)
+                if is_both_results:
+                    c_base, c_aug = st.columns(2)
+                    with c_base:
+                        st.markdown("#### Baseline LLMs")
+                        if not baseline_wide_df.empty:
+                            st.altair_chart(create_total_score_bar_chart(baseline_wide_df), use_container_width=True)
+                        else:
+                            st.info("No Baseline LLMs scores available.")
+                    with c_aug:
+                        st.markdown("#### Expert Augmented LLMs")
+                        if not augmented_wide_df.empty:
+                            st.altair_chart(create_total_score_bar_chart(augmented_wide_df), use_container_width=True)
+                        else:
+                            st.info("No Expert Augmented LLMs scores available.")
+                else:
+                    st.altair_chart(create_total_score_bar_chart(filtered_wide_df), use_container_width=True)
 
             # 3) Dimension Comparison (also has inside Dimension Heatmap)
             with tab_dim:
-                st.altair_chart(create_grouped_bar_chart(filtered_long_df), use_container_width=True)
-                st.altair_chart(create_average_dimension_chart(filtered_long_df), use_container_width=True)
-                st.divider()
-                st.markdown("##### 🗺️ Dimension Heatmap")
-                st.altair_chart(create_heatmap_chart(filtered_long_df), use_container_width=True)
+                if is_both_results:
+                    c_base, c_aug = st.columns(2)
+                    with c_base:
+                        st.markdown("#### Baseline LLMs")
+                        if not baseline_long_df.empty:
+                            st.altair_chart(create_grouped_bar_chart(baseline_long_df), use_container_width=True)
+                            st.altair_chart(create_average_dimension_chart(baseline_long_df), use_container_width=True)
+                        else:
+                            st.info("No Baseline LLMs scores available.")
+                    with c_aug:
+                        st.markdown("#### Expert Augmented LLMs")
+                        if not augmented_long_df.empty:
+                            st.altair_chart(create_grouped_bar_chart(augmented_long_df), use_container_width=True)
+                            st.altair_chart(create_average_dimension_chart(augmented_long_df), use_container_width=True)
+                        else:
+                            st.info("No Expert Augmented LLMs scores available.")
 
-            # 4) Dimension Scores Table
-            with tab_table:
-                st.markdown("##### 15-Item Response Scores & Dimension Analysis")
-                st.caption("Question responses (Q1–Q15), Total Score (out of 75), and converted 5-dimension decimal scores.")
-                dim_table_height = min(max(520, (len(filtered_wide_df) + 1) * 38 + 20), 980)
-                st.dataframe(filtered_wide_df, use_container_width=True, height=dim_table_height)
-                csv_data = filtered_wide_df.to_csv(index=False)
-                st.download_button(
-                    "Download 15-Item Scores (CSV)",
-                    data=csv_data,
-                    file_name=f"15_item_dimension_scores_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                    mime="text/csv",
-                )
+                    st.divider()
+                    st.markdown("##### 🗺️ Dimension Heatmap (Side-by-Side)")
+                    h_base, h_aug = st.columns(2)
+                    with h_base:
+                        st.markdown("#### Baseline LLMs")
+                        if not baseline_long_df.empty:
+                            st.altair_chart(create_heatmap_chart(baseline_long_df), use_container_width=True)
+                    with h_aug:
+                        st.markdown("#### Expert Augmented LLMs")
+                        if not augmented_long_df.empty:
+                            st.altair_chart(create_heatmap_chart(augmented_long_df), use_container_width=True)
+                else:
+                    st.altair_chart(create_grouped_bar_chart(filtered_long_df), use_container_width=True)
+                    st.altair_chart(create_average_dimension_chart(filtered_long_df), use_container_width=True)
+                    st.divider()
+                    st.markdown("##### 🗺️ Dimension Heatmap")
+                    st.altair_chart(create_heatmap_chart(filtered_long_df), use_container_width=True)
+
+            # 4) Dimension Scores Table (local runs only)
+            if tab_table is not None:
+                with tab_table:
+                    st.markdown("##### 15-Item Response Scores & Dimension Analysis")
+                    st.caption("Question responses (Q1–Q15), Total Score (out of 75), and converted 5-dimension decimal scores.")
+                    ts_now = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    if is_both_results:
+                        t_base, t_aug = st.columns(2)
+                        side_rows = max(len(baseline_wide_df), len(augmented_wide_df))
+                        side_table_height = min(max(520, (side_rows + 1) * 38 + 20), 980)
+                        with t_base:
+                            st.markdown("#### Baseline LLMs")
+                            st.dataframe(baseline_wide_df, use_container_width=True, height=side_table_height)
+                            st.download_button(
+                                "Download Baseline Scores (CSV)",
+                                data=baseline_wide_df.to_csv(index=False),
+                                file_name=f"baseline_15_item_scores_{ts_now}.csv",
+                                mime="text/csv",
+                            )
+                        with t_aug:
+                            st.markdown("#### Expert Augmented LLMs")
+                            st.dataframe(augmented_wide_df, use_container_width=True, height=side_table_height)
+                            st.download_button(
+                                "Download Expert Augmented Scores (CSV)",
+                                data=augmented_wide_df.to_csv(index=False),
+                                file_name=f"expert_augmented_15_item_scores_{ts_now}.csv",
+                                mime="text/csv",
+                            )
+                        st.download_button(
+                            "Download Combined Scores (CSV)",
+                            data=filtered_wide_df.to_csv(index=False),
+                            file_name=f"combined_15_item_dimension_scores_{ts_now}.csv",
+                            mime="text/csv",
+                        )
+                    else:
+                        dim_table_height = min(max(520, (len(filtered_wide_df) + 1) * 38 + 20), 980)
+                        st.dataframe(filtered_wide_df, use_container_width=True, height=dim_table_height)
+                        csv_data = filtered_wide_df.to_csv(index=False)
+                        st.download_button(
+                            "Download 15-Item Scores (CSV)",
+                            data=csv_data,
+                            file_name=f"15_item_dimension_scores_{ts_now}.csv",
+                            mime="text/csv",
+                        )
 
             # Only calculated and rendered in Both mode
-            if is_both_results:
+            if is_both_results and tab_both_comp is not None:
                 with tab_both_comp:
                     st.altair_chart(
                         create_mode_comparison_chart(filtered_long_df, active_expert_profile),
@@ -798,12 +950,32 @@ if st.session_state.results:
     if "execution_mode" not in df.columns:
         df["execution_mode"] = "Untrained"
     overview_cols = ["model_key", "model_version", "company", "region", "execution_mode", "response", "error"]
-    overview_table_height = min(max(520, (len(df) + 1) * 38 + 20), 980)
-    st.dataframe(
-        df[[c for c in overview_cols if c in df.columns]],
-        use_container_width=True,
-        height=overview_table_height,
-    )
+    if is_both_results:
+        ov_base_df = df[df["execution_mode"] == "Untrained"].reset_index(drop=True)
+        ov_aug_df = df[df["execution_mode"] == "Trained"].reset_index(drop=True)
+        ov_height = min(max(520, (max(len(ov_base_df), len(ov_aug_df)) + 1) * 38 + 20), 980)
+        ov_left, ov_right = st.columns(2)
+        with ov_left:
+            st.markdown("#### Baseline LLMs")
+            st.dataframe(
+                ov_base_df[[c for c in overview_cols if c in ov_base_df.columns]],
+                use_container_width=True,
+                height=ov_height,
+            )
+        with ov_right:
+            st.markdown("#### Expert Augmented LLMs")
+            st.dataframe(
+                ov_aug_df[[c for c in overview_cols if c in ov_aug_df.columns]],
+                use_container_width=True,
+                height=ov_height,
+            )
+    else:
+        overview_table_height = min(max(520, (len(df) + 1) * 38 + 20), 980)
+        st.dataframe(
+            df[[c for c in overview_cols if c in df.columns]],
+            use_container_width=True,
+            height=overview_table_height,
+        )
 
     jsonl_data = "\n".join(json.dumps(r, ensure_ascii=False) for r in st.session_state.results)
     st.download_button(
@@ -824,8 +996,15 @@ if st.session_state.results:
     def _render_response_card(record, show_mode_badge=False):
         with st.container(border=True):
             exact_ver = get_exact_model_version(record)
-            mode_str = record.get("execution_mode", "Untrained")
-            mode_tag = f" · **`[{mode_str}]`**" if show_mode_badge else ""
+            raw_mode = record.get("execution_mode", "Untrained")
+            mode_label = (
+                "Baseline LLMs"
+                if raw_mode == "Untrained"
+                else "Expert Augmented LLMs"
+                if raw_mode == "Trained"
+                else str(raw_mode)
+            )
+            mode_tag = f" · **`[{mode_label}]`**" if show_mode_badge else ""
             st.markdown(f"**{exact_ver}** (`{record['model_key']}`) · {record['company']} · _{record['region']}_{mode_tag}")
             if record.get("error"):
                 st.error(record["error"])
@@ -850,7 +1029,11 @@ if st.session_state.results:
                     st.markdown(record["response"])
 
     if is_both_results:
-        st.caption("Left column: **Untrained (Zero-Shot)** · Right column: **Trained (Leave-One-Out In-Context)**")
+        hdr_base, hdr_aug = st.columns(2)
+        with hdr_base:
+            st.markdown("#### Baseline LLMs")
+        with hdr_aug:
+            st.markdown("#### Expert Augmented LLMs")
         grouped_by_model = {}
         for rec in st.session_state.results:
             grouped_by_model.setdefault(rec["model_key"], {})[rec.get("execution_mode", "Untrained")] = rec

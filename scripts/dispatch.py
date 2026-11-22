@@ -61,6 +61,9 @@ _OPENAI_COMPAT_PROVIDERS = {
 # behind Hugging Face Router. Cap simultaneous requests to this shared origin to
 # prevent Cloudflare 504 gateway timeouts during multi-model / "Both Above" bursts.
 _PUBLICAI_ORIGIN_SEMAPHORE = threading.Semaphore(2)
+# Serialize Gemini calls (e.g. Untrained + Trained in "Both Above" mode) to avoid
+# colliding on free-tier per-minute quota limits (429 RESOURCE_EXHAUSTED).
+_GEMINI_SEMAPHORE = threading.Semaphore(1)
 
 _KNOWN_PREFIXES = (
     "gemini/",
@@ -133,22 +136,19 @@ def _parse_model_string(model_str: str):
     return "openai", model_str
 
 
-def _call_gemini(model_id, system_prompt, prompt, temperature, max_tokens):
+def _call_gemini(model_id, system_prompt, prompt, temperature, max_tokens, return_model_id=False):
     """Call Gemini via the google-genai SDK (the current, non-deprecated SDK).
 
     system_instruction is a first-class parameter -- no workarounds needed.
 
     Key considerations:
-    1. Token Allocation: In thinking/reasoning models or complex table generation,
-       a low token limit (e.g. <= 500) causes Gemini to halt mid-table after 1-2 lines.
-       We enforce a generous output token budget (at least 2048) so the full table,
-       evaluations, notes, and rewrite are completely generated.
-    2. Thinking Budget: Set thinking_budget=0 to ensure 100% of tokens go to the
-       visible response and none are wasted on internal thoughts.
-    3. Transient 503 Retries: If Google servers report temporary high demand (503),
-       retry with brief backoff.
+    1. Token Allocation: Enforce a generous output token budget (at least 4096) so the
+       full 15-item table is never truncated.
+    2. Thinking Budget: Set thinking_budget=0 so 100% of tokens go to the visible response.
+    3. Resilience: Serialize concurrent calls (e.g. Both Above mode), retry on transient
+       503/429 spikes, and fall back only to versioned Flash models supported on both
+       v1 and v1beta (never '-latest' aliases, which 404 on API version v1).
     """
-    import time
     from google import genai
     from google.genai import types
 
@@ -165,39 +165,54 @@ def _call_gemini(model_id, system_prompt, prompt, temperature, max_tokens):
     )
 
     models_to_try = [model_id]
-    # If standard 3.6 is facing regional 503 spikes, fallback gracefully
-    if "3.6-flash" in model_id:
-        models_to_try.append("gemini-flash-latest")
+    # Versioned Flash fallbacks valid on both v1 and v1beta (avoid '-latest' which 404s on v1)
+    if "flash" in model_id.lower():
+        for fb in ("gemini-3.5-flash", "gemini-3.7-flash", "gemini-3.5-flash-lite"):
+            if fb != model_id:
+                models_to_try.append(fb)
 
+    primary_exc = None
     last_exc = None
-    for attempt_model in models_to_try:
-        for attempt in range(3):
-            try:
-                response = client.models.generate_content(
-                    model=attempt_model,
-                    contents=prompt,
-                    config=config,
-                )
-                if response.candidates and response.candidates[0].content:
-                    parts = response.candidates[0].content.parts or []
-                    text = "".join(
-                        part.text
-                        for part in parts
-                        if getattr(part, "text", None) and not getattr(part, "thought", False)
+    with _GEMINI_SEMAPHORE:
+        for idx, attempt_model in enumerate(models_to_try):
+            for attempt in range(3):
+                try:
+                    response = client.models.generate_content(
+                        model=attempt_model,
+                        contents=prompt,
+                        config=config,
                     )
-                    if text:
-                        return text
-                return response.text or ""
-            except Exception as exc:
-                last_exc = exc
-                # If high demand (503) or rate limit (429), pause and retry
-                if "503" in str(exc) or "429" in str(exc):
-                    time.sleep(1.5 * (attempt + 1))
-                    continue
-                break
+                    text = ""
+                    if response.candidates and response.candidates[0].content:
+                        parts = response.candidates[0].content.parts or []
+                        text = "".join(
+                            part.text
+                            for part in parts
+                            if getattr(part, "text", None) and not getattr(part, "thought", False)
+                        )
+                    if not text:
+                        text = response.text or ""
+                    if return_model_id:
+                        return text, attempt_model
+                    return text
+                except Exception as exc:
+                    last_exc = exc
+                    if idx == 0:
+                        primary_exc = exc
+                    err_str = str(exc)
+                    # If high demand (503) or rate limit (429), pause and retry
+                    if "503" in err_str or "429" in err_str:
+                        time.sleep(2.0 * (attempt + 1))
+                        continue
+                    break
 
-    if last_exc:
+    # Surface the primary model's error if all fallbacks failed (avoid masking 429/503 behind a fallback 404)
+    if primary_exc is not None:
+        raise primary_exc
+    if last_exc is not None:
         raise last_exc
+    if return_model_id:
+        return "No response received from Gemini.", model_id
     return "No response received from Gemini."
 
 
@@ -707,9 +722,12 @@ def query_model(
 
     try:
         if provider == "gemini":
-            record["response"] = _call_gemini(
-                model_id, system_prompt, prompt, temperature, max_tokens
+            response_text, resolved_model_id = _call_gemini(
+                model_id, system_prompt, prompt, temperature, max_tokens, return_model_id=True
             )
+            record["response"] = response_text
+            if resolved_model_id and resolved_model_id != model_id:
+                record["model_string"] = f"gemini/{resolved_model_id}"
         elif provider == "anthropic":
             record["response"] = _call_claude(
                 model_id, api_key, system_prompt, prompt, temperature, max_tokens

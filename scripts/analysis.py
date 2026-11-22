@@ -768,9 +768,9 @@ def create_mode_comparison_chart(
         )
         for _, r in grouped.iterrows():
             mode_label = (
-                "Untrained (Zero-Shot)"
+                "Baseline LLMs"
                 if r["execution_mode"] == "Untrained"
-                else "Trained (Leave-One-Out Few-Shot)"
+                else "Expert Augmented LLMs"
                 if r["execution_mode"] == "Trained"
                 else str(r["execution_mode"])
             )
@@ -811,8 +811,8 @@ def create_mode_comparison_chart(
                 title="Evaluation Group",
                 scale=alt.Scale(
                     domain=[
-                        "Untrained (Zero-Shot)",
-                        "Trained (Leave-One-Out Few-Shot)",
+                        "Baseline LLMs",
+                        "Expert Augmented LLMs",
                         "Expert Consensus Benchmark",
                     ],
                     range=["#e67e22", "#2ecc71", "#4a90e2"],
@@ -841,7 +841,7 @@ def create_mode_comparison_chart(
 
     return (bars + labels).properties(
         title=alt.TitleParams(
-            text="Untrained vs. Trained (Leave-One-Out) vs. Expert Benchmark",
+            text="Baseline LLMs vs. Expert Augmented LLMs vs. Expert Benchmark",
             subtitle="Comparing panel mean dimension scores against validated expert consensus ratings",
             fontSize=16,
         ),
@@ -853,7 +853,7 @@ def create_model_shift_chart(
     wide_df: pd.DataFrame,
     expert_total: Optional[float] = None,
 ) -> Optional[alt.Chart]:
-    """Compare each model's Total Score (Max 75) side-by-side between Untrained and Trained modes."""
+    """Compare each model's Total Score (Max 75) side-by-side between Baseline and Expert Augmented modes."""
     if (
         wide_df.empty
         or "execution_mode" not in wide_df.columns
@@ -863,7 +863,10 @@ def create_model_shift_chart(
 
     chart_df = wide_df[
         ["base_model_display", "execution_mode", "Total Score (Max 75)"]
-    ].dropna().rename(columns={"Total Score (Max 75)": "total_score"})
+    ].dropna().rename(columns={"Total Score (Max 75)": "total_score"}).copy()
+    chart_df["mode_label"] = chart_df["execution_mode"].map(
+        {"Untrained": "Baseline LLMs", "Trained": "Expert Augmented LLMs"}
+    ).fillna(chart_df["execution_mode"])
 
     if chart_df.empty:
         return None
@@ -883,18 +886,18 @@ def create_model_shift_chart(
                 scale=alt.Scale(domain=[0, 78]),
             ),
             color=alt.Color(
-                "execution_mode:N",
+                "mode_label:N",
                 title="Execution Mode",
                 scale=alt.Scale(
-                    domain=["Untrained", "Trained"],
+                    domain=["Baseline LLMs", "Expert Augmented LLMs"],
                     range=["#e67e22", "#2ecc71"],
                 ),
                 legend=alt.Legend(orient="bottom"),
             ),
-            xOffset="execution_mode:N",
+            xOffset="mode_label:N",
             tooltip=[
                 alt.Tooltip("base_model_display:N", title="Model"),
-                alt.Tooltip("execution_mode:N", title="Mode"),
+                alt.Tooltip("mode_label:N", title="Mode"),
                 alt.Tooltip("total_score:Q", title="Total Score (Max 75)"),
             ],
         )
@@ -907,7 +910,7 @@ def create_model_shift_chart(
             x=alt.X("base_model_display:N"),
             y=alt.Y("total_score:Q"),
             text=alt.Text("total_score:Q", format=".0f"),
-            xOffset="execution_mode:N",
+            xOffset="mode_label:N",
         )
     )
 
@@ -926,7 +929,7 @@ def create_model_shift_chart(
 
     return layered.properties(
         title=alt.TitleParams(
-            text="Per-Model Total Severity Score: Untrained vs. Trained",
+            text="Per-Model Total Severity Score: Baseline LLMs vs. Expert Augmented LLMs",
             subtitle="Dashed blue line indicates the Expert Consensus Benchmark Total Score (if an Email Scenario is selected)",
             fontSize=16,
         ),
