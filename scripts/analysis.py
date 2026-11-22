@@ -235,18 +235,27 @@ def build_analysis_dataframe(results: List[Dict[str, Any]]) -> Tuple[pd.DataFram
     long_rows = []
     wide_rows = []
 
-    # Enforce exact fixed sequence: gemini, qwen, mistral, claude, gpt4o, deepseek, llama, glm, kimi
-    canonical_keys = [
-        "gemini",
-        "qwen",
-        "mistral",
-        "claude",
-        "gpt4o",
-        "deepseek",
-        "llama",
-        "glm",
-        "kimi",
-    ]
+    # Enforce canonical model sequence from config.py
+    try:
+        from scripts.config import MODEL_SEQUENCE as canonical_keys
+    except ImportError:
+        try:
+            from config import MODEL_SEQUENCE as canonical_keys
+        except ImportError:
+            canonical_keys = [
+                "gemini",
+                "qwen",
+                "mistral",
+                "claude",
+                "gpt4o",
+                "deepseek",
+                "llama",
+                "glm",
+                "kimi",
+                "apertus",
+                "alia",
+                "bielik",
+            ]
     order_map = {k: idx for idx, k in enumerate(canonical_keys)}
     mode_order = {"Untrained": 0, "Trained": 1}
     distinct_modes = {r.get("execution_mode", "Untrained") for r in results if not r.get("error")}
@@ -343,6 +352,7 @@ def create_grouped_bar_chart(df: pd.DataFrame) -> alt.Chart:
     Displays the 5 dimensions converted to continuous decimals from the 15 question responses,
     with exact decimal labels on top of each bar.
     """
+    color_scheme = "category20" if df["model_display"].nunique() > 10 else "category10"
     bars = (
         alt.Chart(df)
         .mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
@@ -361,7 +371,7 @@ def create_grouped_bar_chart(df: pd.DataFrame) -> alt.Chart:
             color=alt.Color(
                 "model_display:N",
                 title="LLM Version & Company",
-                scale=alt.Scale(scheme="category10"),
+                scale=alt.Scale(scheme=color_scheme),
                 legend=alt.Legend(orient="bottom", columns=3),
             ),
             xOffset="model_display:N",
@@ -391,7 +401,7 @@ def create_grouped_bar_chart(df: pd.DataFrame) -> alt.Chart:
             subtitle="Comparing continuous decimal behavior scores converted from the 15 question responses",
             fontSize=16,
         ),
-        height=420,
+        height=580,
     )
 
 
@@ -408,6 +418,7 @@ def create_total_score_bar_chart(df: pd.DataFrame) -> alt.Chart:
             columns={"score": "total_score"}
         )
 
+    color_scheme = "category20" if chart_df["model_display"].nunique() > 10 else "category10"
     bars = (
         alt.Chart(chart_df)
         .mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
@@ -427,7 +438,7 @@ def create_total_score_bar_chart(df: pd.DataFrame) -> alt.Chart:
             color=alt.Color(
                 "model_display:N",
                 legend=None,
-                scale=alt.Scale(scheme="category10"),
+                scale=alt.Scale(scheme=color_scheme),
             ),
             tooltip=[
                 alt.Tooltip("model_display:N", title="Model"),
@@ -452,7 +463,7 @@ def create_total_score_bar_chart(df: pd.DataFrame) -> alt.Chart:
             subtitle="Sum of all 15 question responses per model (Scale: 15 Minimal → 75 Very High)",
             fontSize=16,
         ),
-        height=400,
+        height=560,
     )
 
 
@@ -513,7 +524,7 @@ def create_heatmap_chart(df: pd.DataFrame) -> alt.Chart:
             subtitle="Converted from 15 question responses: Green = Low/Minimal, Orange/Red = Moderate to Very High",
             fontSize=16,
         ),
-        height=max(220, len(df["model_display"].unique()) * 48 + 100),
+        height=max(340, len(df["model_display"].unique()) * 56 + 130),
     )
 
 
@@ -563,7 +574,7 @@ def create_average_dimension_chart(df: pd.DataFrame) -> alt.Chart:
             subtitle="Ranked from highest detected exploitative behavior to lowest (continuous decimal precision)",
             fontSize=16,
         ),
-        height=260,
+        height=380,
     )
 
 
@@ -625,7 +636,7 @@ def create_regional_bar_chart(df: pd.DataFrame) -> Optional[alt.Chart]:
             subtitle="Comparing average decimal sensitivity by cultural cluster (e.g. Western/US vs China vs Europe)",
             fontSize=16,
         ),
-        height=400,
+        height=540,
     )
 
 
@@ -692,6 +703,10 @@ def generate_radar_svg(
         "#1abc9c",  # teal
         "#f1c40f",  # yellow
         "#e84393",  # pink
+        "#00b894",  # mint
+        "#fd79a8",  # rose
+        "#6c5ce7",  # indigo
+        "#a29bfe",  # lavender
     ]
 
     for m_idx, m in enumerate(models_data):
@@ -830,7 +845,7 @@ def create_mode_comparison_chart(
             subtitle="Comparing panel mean dimension scores against validated expert consensus ratings",
             fontSize=16,
         ),
-        height=400,
+        height=540,
     )
 
 
@@ -915,6 +930,6 @@ def create_model_shift_chart(
             subtitle="Dashed blue line indicates the Expert Consensus Benchmark Total Score (if an Email Scenario is selected)",
             fontSize=16,
         ),
-        height=400,
+        height=580,
     )
 

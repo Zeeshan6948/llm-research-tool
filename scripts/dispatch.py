@@ -2,9 +2,12 @@
 dispatch.py -- send one prompt to all (or selected) models and save results.
 
 Provider routing (no LiteLLM):
-  - gemini/*          → google-generativeai SDK  (native system_instruction)
+  - gemini/*          → google-genai SDK (native system_instruction)
+  - anthropic/*       → anthropic SDK (native system prompt)
   - together_ai/*     → OpenAI SDK + Together AI base URL
   - mistral/*         → OpenAI SDK + Mistral AI base URL
+  - publicai/*        → OpenAI SDK + Public AI / Swiss AI Apertus base URL
+  - huggingface/*     → OpenAI SDK + Hugging Face Inference Providers router
   - scaleway/*        → OpenAI SDK + Scaleway Generative APIs base URL
   - premai/*          → OpenAI SDK + Prem AI base URL
   - gpt-* / o1-*      → OpenAI SDK (default)
@@ -21,9 +24,12 @@ comparison/evaluation stage.
 """
 
 import argparse
+import contextlib
 import json
 import os
 import sys
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
@@ -44,10 +50,30 @@ load_dotenv()
 _OPENAI_COMPAT_PROVIDERS = {
     "together_ai": "https://api.together.xyz/v1",
     "mistral":     "https://api.mistral.ai/v1",
+    "publicai":    "https://api.publicai.co/v1",
+    "huggingface": "https://router.huggingface.co/v1",
     "scaleway":    "https://api.scaleway.ai/v1",
     "premai":      "https://gateway.prem.io/v1",
     # openai has no base_url override (uses SDK default)
 }
+
+# Public AI (`api.publicai.co`) serves Apertus directly and also backs ALIA/Bielik
+# behind Hugging Face Router. Cap simultaneous requests to this shared origin to
+# prevent Cloudflare 504 gateway timeouts during multi-model / "Both Above" bursts.
+_PUBLICAI_ORIGIN_SEMAPHORE = threading.Semaphore(2)
+
+_KNOWN_PREFIXES = (
+    "gemini/",
+    "anthropic/",
+    "claude/",
+    "together_ai/",
+    "mistral/",
+    "publicai/",
+    "huggingface/",
+    "hf/",
+    "scaleway/",
+    "premai/",
+)
 
 
 def get_secret(key: str, default: str = "") -> str:
@@ -66,23 +92,41 @@ def get_secret(key: str, default: str = "") -> str:
     return os.getenv(key, default)
 
 
+def _get_first_secret(keys, default: str = "") -> str:
+    """Return the first non-empty secret across a sequence of environment/secret key names."""
+    for k in keys or ():
+        val = get_secret(k, "").strip()
+        if val:
+            return val
+    return default
+
+
+def _get_entry_api_key(entry: dict) -> str:
+    """Resolve an entry's API key using its primary env_key and any env_key_aliases."""
+    keys = [entry["env_key"]] + list(entry.get("env_key_aliases", []))
+    return _get_first_secret(keys, "")
+
+
 def _parse_model_string(model_str: str):
     """Split 'provider/model-name' into (provider, model_id).
 
     Examples
     --------
-    'gemini/gemini-3.6-flash'                        -> ('gemini', 'gemini-3.6-flash')
-    'anthropic/claude-3-7-sonnet-20250219'           -> ('anthropic', 'claude-3-7-sonnet-20250219')
-    'together_ai/meta-llama/Llama-3.3-70B-...'       -> ('together_ai', 'meta-llama/Llama-3.3-70B-...')
-    'mistral/open-mistral-7b'                        -> ('mistral', 'open-mistral-7b')
-    'gpt-4o-mini'                                    -> ('openai', 'gpt-4o-mini')
+    'gemini/gemini-3.6-flash'                                -> ('gemini', 'gemini-3.6-flash')
+    'anthropic/claude-3-7-sonnet-20250219'                   -> ('anthropic', 'claude-3-7-sonnet-20250219')
+    'together_ai/meta-llama/Llama-3.3-70B-...'               -> ('together_ai', 'meta-llama/Llama-3.3-70B-...')
+    'mistral/open-mistral-7b'                                -> ('mistral', 'open-mistral-7b')
+    'publicai/swiss-ai/apertus-v1.5-70b'                     -> ('publicai', 'swiss-ai/apertus-v1.5-70b')
+    'huggingface/utter-project/EuroLLM-22B-Instruct-2512'    -> ('huggingface', 'utter-project/EuroLLM-22B-Instruct-2512')
+    'gpt-4o-mini'                                            -> ('openai', 'gpt-4o-mini')
     """
-    known_prefixes = ("gemini/", "anthropic/", "claude/", "together_ai/", "mistral/", "scaleway/", "premai/")
-    for prefix in known_prefixes:
+    for prefix in _KNOWN_PREFIXES:
         if model_str.startswith(prefix):
             provider = prefix.rstrip("/")
             if provider == "claude":
                 provider = "anthropic"
+            elif provider == "hf":
+                provider = "huggingface"
             model_id = model_str[len(prefix):]
             return provider, model_id
     # No recognised prefix → assume OpenAI
@@ -208,30 +252,104 @@ def _has_complete_15_item_table(text: str, min_items: int = 12) -> bool:
     return len(found) >= min_items
 
 
-def _call_openai_compat(model_id, provider, api_key, system_prompt, prompt, temperature, max_tokens):
-    """Call any OpenAI-compatible endpoint (OpenAI, Together AI, Mistral).
+def _is_model_unavailable_error(exc: Exception) -> bool:
+    """Return True if an API error indicates the requested model ID is missing or not served."""
+    msg = str(exc).lower()
+    markers = (
+        "404",
+        "model_not_found",
+        "model not found",
+        "does not exist",
+        "not supported",
+        "no inference provider",
+        "not deployed",
+        "unknown model",
+        "invalid model",
+    )
+    return any(m in msg for m in markers)
 
-    All three speak the same chat/completions API; only base_url and api_key differ.
-    Includes reasoning-suppression and automatic table-enforcement retry for models
-    like Llama (Muse-Spark), GLM, and Kimi when long Trained prompts are used.
+
+def _is_token_limit_error(exc: Exception) -> bool:
+    """Return True if an API error indicates max_tokens exceeds the model's context window."""
+    msg = str(exc).lower()
+    markers = (
+        "max_tokens",
+        "max_new_tokens",
+        "context length",
+        "maximum context",
+        "context window",
+        "input validation error",
+        "exceeds",
+    )
+    return any(m in msg for m in markers)
+
+
+def _is_transient_error(exc: Exception) -> bool:
+    """Return True if an API error is a transient gateway/timeout/rate-limit failure."""
+    msg = str(exc).lower()
+    markers = (
+        "502",
+        "503",
+        "504",
+        "429",
+        "gateway time-out",
+        "gateway timeout",
+        "origin_gateway_timeout",
+        "bad gateway",
+        "service unavailable",
+        "overloaded",
+        "rate limit",
+        "timed out",
+        "timeout",
+        "temporarily unavailable",
+        "connection error",
+    )
+    return any(m in msg for m in markers)
+
+
+def _call_openai_compat(
+    model_id,
+    provider,
+    api_key,
+    system_prompt,
+    prompt,
+    temperature,
+    max_tokens,
+    base_url_override=None,
+    fallback_models=None,
+    return_model_id=False,
+):
+    """Call any OpenAI-compatible endpoint (OpenAI, Together AI, Mistral, Public AI, Hugging Face).
+
+    All speak the same chat/completions API; only base_url, headers, and api_key differ.
+    Includes streaming keep-alive for Public AI / Hugging Face (preventing Cloudflare 504
+    gateway timeouts), transient 5xx/429 retries, reasoning-suppression, context-length /
+    model-ID fallbacks, and automatic table-enforcement retry when long Trained prompts are used.
     """
     from openai import OpenAI
 
-    base_url = _OPENAI_COMPAT_PROVIDERS.get(provider)  # None → SDK uses OpenAI default
-    kwargs = {"api_key": api_key}
+    base_url = base_url_override or _OPENAI_COMPAT_PROVIDERS.get(provider)  # None → SDK uses OpenAI default
+    kwargs = {"api_key": api_key, "timeout": 180.0}
     if base_url:
         kwargs["base_url"] = base_url
 
+    headers = {}
     # Project-scoped OpenAI keys (sk-proj-...) may need the project header.
     if provider == "openai":
         project_id = get_secret("OPENAI_PROJECT_ID", "")
         if project_id:
-            kwargs["default_headers"] = {"OpenAI-Project": project_id}
+            headers["OpenAI-Project"] = project_id
+    # Public AI gateway requires a non-empty identifying User-Agent header.
+    elif provider == "publicai":
+        headers["User-Agent"] = get_secret("PUBLICAI_USER_AGENT", "llm-research-tool/1.0")
+
+    if headers:
+        kwargs["default_headers"] = headers
 
     client = OpenAI(**kwargs)
 
     # Append a concise format reminder at the end of the user prompt so long system prompts
-    # in Trained mode don't cause Llama, GLM, or Kimi to drift into prose/non-tabular output.
+    # in Trained mode don't cause open models to drift into prose/non-tabular output.
     enforced_user_prompt = (
         f"{prompt.rstrip()}\n\n"
         "[IMPORTANT: Respond ONLY with the 17-line Markdown table starting immediately with "
@@ -244,35 +362,114 @@ def _call_openai_compat(model_id, provider, api_key, system_prompt, prompt, temp
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": enforced_user_prompt})
 
-    # Allocate generous token budget (8192 for Together AI reasoning models, fallback to 4096)
-    # so models like GLM-5.3-Flash, Kimi-K3, and Muse-Spark never exhaust max_tokens inside reasoning_content.
+    # Allocate generous token budget (8192 for Together AI reasoning models, 4096 otherwise)
+    # so reasoning models never exhaust max_tokens inside reasoning_content.
     effective_max_tokens = max(max_tokens, 8192 if provider == "together_ai" else 4096)
 
-    def _invoke(msgs, tok_limit, disable_thinking=True):
+    # Stream responses for Public AI / Hugging Face so Cloudflare receives bytes immediately
+    # and never terminates slow 40B/70B generations with a 100s 504 Gateway Timeout.
+    use_stream = provider in ("publicai", "huggingface")
+
+    def _run_completion(req_kwargs):
+        if not use_stream:
+            resp = client.chat.completions.create(**req_kwargs)
+            choice_msg = resp.choices[0].message
+            return (choice_msg.content or "").strip(), (getattr(choice_msg, "reasoning_content", None) or "")
+
+        stream = client.chat.completions.create(**{**req_kwargs, "stream": True})
+        content_parts = []
+        reasoning_parts = []
+        for chunk in stream:
+            choices = getattr(chunk, "choices", None)
+            if not choices:
+                continue
+            delta = getattr(choices[0], "delta", None)
+            if not delta:
+                continue
+            if getattr(delta, "content", None):
+                content_parts.append(delta.content)
+            if getattr(delta, "reasoning_content", None):
+                reasoning_parts.append(delta.reasoning_content)
+        return "".join(content_parts).strip(), "".join(reasoning_parts)
+
+    def _invoke_single(target_model, msgs, tok_limit, disable_thinking=True):
         req_kwargs = {
-            "model": model_id,
+            "model": target_model,
             "messages": msgs,
             "temperature": temperature,
             "max_tokens": tok_limit,
         }
-        if provider == "together_ai" and disable_thinking:
+        if provider in ("together_ai", "huggingface", "publicai") and disable_thinking:
             req_kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
 
-        try:
-            return client.chat.completions.create(**req_kwargs)
-        except Exception:
-            # Fallback if provider rejects extra_body or 8192 token limit
-            req_kwargs.pop("extra_body", None)
-            try:
-                return client.chat.completions.create(**req_kwargs)
-            except Exception:
-                req_kwargs["max_tokens"] = 4096
-                return client.chat.completions.create(**req_kwargs)
+        origin_lock = (
+            _PUBLICAI_ORIGIN_SEMAPHORE
+            if provider in ("publicai", "huggingface")
+            else contextlib.nullcontext()
+        )
 
-    response = _invoke(messages, effective_max_tokens, disable_thinking=True)
-    choice_msg = response.choices[0].message
-    content = (choice_msg.content or "").strip()
-    reasoning_text = getattr(choice_msg, "reasoning_content", None) or ""
+        last_err = None
+        for attempt in range(3):
+            try:
+                with origin_lock:
+                    try:
+                        return _run_completion(req_kwargs)
+                    except Exception as first_exc:
+                        # Retry without extra_body if provider rejected it
+                        if "extra_body" in req_kwargs:
+                            req_kwargs.pop("extra_body", None)
+                            try:
+                                return _run_completion(req_kwargs)
+                            except Exception as second_exc:
+                                first_exc = second_exc
+
+                        # Retry with smaller max_tokens if the model has a tighter context/output cap
+                        if _is_token_limit_error(first_exc) or req_kwargs["max_tokens"] > 4096:
+                            for fallback_limit in (4096, 1536, 1024):
+                                if fallback_limit >= req_kwargs["max_tokens"]:
+                                    continue
+                                req_kwargs["max_tokens"] = fallback_limit
+                                try:
+                                    return _run_completion(req_kwargs)
+                                except Exception as limit_exc:
+                                    first_exc = limit_exc
+                                    if not _is_token_limit_error(limit_exc):
+                                        break
+                        raise first_exc
+            except Exception as exc:
+                last_err = exc
+                if attempt < 2 and _is_transient_error(exc):
+                    time.sleep(3.0 * (attempt + 1))
+                    continue
+                raise
+
+        if last_err is not None:
+            raise last_err
+        return "", ""
+
+    model_candidates = [model_id] + [m for m in (fallback_models or []) if m and m != model_id]
+    active_model_id = model_id
+    content = ""
+    reasoning_text = ""
+    last_exc = None
+    succeeded = False
+
+    for idx, cand_model in enumerate(model_candidates):
+        try:
+            content, reasoning_text = _invoke_single(
+                cand_model, messages, effective_max_tokens, disable_thinking=True
+            )
+            active_model_id = cand_model
+            succeeded = True
+            break
+        except Exception as exc:
+            last_exc = exc
+            if idx + 1 < len(model_candidates) and _is_model_unavailable_error(exc):
+                continue
+            raise
+
+    if not succeeded and last_exc is not None:
+        raise last_exc
 
     # If content is empty or doesn't contain a valid 15-item table (e.g. model output prose or
     # spent its budget in reasoning_content), run a fast format-repair pass.
@@ -305,9 +502,7 @@ def _call_openai_compat(model_id, provider, api_key, system_prompt, prompt, temp
             },
         ]
         try:
-            retry_resp = _invoke(retry_messages, 4096, disable_thinking=True)
-            retry_msg = retry_resp.choices[0].message
-            retry_content = (retry_msg.content or "").strip()
+            retry_content, _ = _invoke_single(active_model_id, retry_messages, 4096, disable_thinking=True)
             if _has_complete_15_item_table(retry_content) or (not content and retry_content):
                 content = retry_content
         except Exception:
@@ -315,6 +510,8 @@ def _call_openai_compat(model_id, provider, api_key, system_prompt, prompt, temp
 
     if not content and reasoning_text:
         content = reasoning_text
+    if return_model_id:
+        return content, active_model_id
     return content
 
 
@@ -381,70 +578,63 @@ def _normalize_markdown_table(text: str) -> str:
     repaired = []
     has_header = False
     has_sep = False
-    seen_questions = set()
+    numbered_rows = {}
+    fallback_rows = []
 
     for line in table_lines:
         # Check if header row
         if re.search(r"\|\s*(?:Question|Item)\s*\|", line, re.IGNORECASE):
-            if not has_header:
-                repaired.append("| Question | Answer | Reason |")
-                has_header = True
+            has_header = True
             continue
 
         # Check if a model merged the separator row with row 1: e.g. '| :---: | 5 | reason |'
         m_merged = re.match(r"^\|\s*:?-+:?\s*\|\s*([1-5])\s*\|(.*)$", line)
         if m_merged:
-            if not has_header:
-                repaired.append("| Question | Answer | Reason |")
-                has_header = True
-            if not has_sep:
-                repaired.append("| :---: | :---: | :--- |")
-                has_sep = True
-            if 1 not in seen_questions:
-                repaired.append(f"| 1 | {m_merged.group(1)} |{m_merged.group(2)}")
-                seen_questions.add(1)
+            has_header = True
+            has_sep = True
+            if 1 not in numbered_rows:
+                reason_col = m_merged.group(2).strip()
+                if not reason_col.endswith("|"):
+                    reason_col = f"{reason_col} |"
+                numbered_rows[1] = f"| 1 | {m_merged.group(1)} | {reason_col}"
             continue
 
         # Check if normal separator row
         if re.match(r"^\|\s*:?-+:?\s*\|", line):
-            if not has_header:
-                repaired.append("| Question | Answer | Reason |")
-                has_header = True
-            if not has_sep:
-                repaired.append("| :---: | :---: | :--- |")
-                has_sep = True
+            has_header = True
+            has_sep = True
             continue
 
-        # Check if data row has a valid question number 1..15 (ignore extraneous non-1..15 tables)
+        # Check if data row has a valid question number 1..15 (ignore duplicates / extraneous tables)
         m_q = re.match(r"^\|\s*(\d{1,2})\s*\|\s*([1-5])(?:\.0)?(?:\s*/\s*5)?\s*\|(.*)$", line)
         if m_q:
             q_num = int(m_q.group(1))
             if 1 <= q_num <= 15:
-                if q_num in seen_questions:
-                    continue
-                if not has_header:
-                    repaired.append("| Question | Answer | Reason |")
-                    has_header = True
-                if not has_sep:
-                    repaired.append("| :---: | :---: | :--- |")
-                    has_sep = True
-                reason_col = m_q.group(3).strip()
-                if not reason_col.endswith("|"):
-                    reason_col = f"{reason_col} |"
-                repaired.append(f"| {q_num} | {m_q.group(2)} | {reason_col}")
-                seen_questions.add(q_num)
+                if q_num not in numbered_rows:
+                    reason_col = m_q.group(3).strip()
+                    if not reason_col.endswith("|"):
+                        reason_col = f"{reason_col} |"
+                    numbered_rows[q_num] = f"| {q_num} | {m_q.group(2)} | {reason_col}"
                 continue
 
-        # Fallback data row
-        if not has_header:
-            repaired.append("| Question | Answer | Reason |")
-            has_header = True
-        if not has_sep:
-            repaired.append("| :---: | :---: | :--- |")
-            has_sep = True
-        repaired.append(line)
+        # Collect fallback row only if we don't end up with a structured 1..15 table
+        fallback_rows.append(line)
 
-    return "\n".join(repaired)
+    if numbered_rows:
+        repaired = [
+            "| Question | Answer | Reason |",
+            "| :---: | :---: | :--- |",
+        ] + [numbered_rows[q] for q in sorted(numbered_rows.keys())]
+        return "\n".join(repaired)
+
+    if fallback_rows:
+        repaired = [
+            "| Question | Answer | Reason |",
+            "| :---: | :---: | :--- |",
+        ] + fallback_rows
+        return "\n".join(repaired)
+
+    return cleaned
 
 
 # ---------------------------------------------------------------------------
@@ -461,8 +651,10 @@ def get_available_models(requested_keys):
             print(f"  [skip] '{key}' is not in config.py MODELS -- typo?")
             continue
         entry = MODELS[key]
-        if not get_secret(entry["env_key"]):
-            print(f"  [skip] '{key}' needs {entry['env_key']} in your .env file or Streamlit secrets")
+        if not _get_entry_api_key(entry):
+            aliases = entry.get("env_key_aliases", [])
+            alias_hint = f" (or {' / '.join(aliases)})" if aliases else ""
+            print(f"  [skip] '{key}' needs {entry['env_key']}{alias_hint} in your .env file or Streamlit secrets")
             continue
         available[key] = entry
     return available
@@ -498,7 +690,20 @@ def query_model(
     }
 
     provider, model_id = _parse_model_string(entry["model"])
-    api_key = get_secret(entry["env_key"], "")
+    api_key = _get_entry_api_key(entry)
+
+    # Allow optional per-entry model ID and base URL overrides via .env / Streamlit secrets
+    model_override = _get_first_secret(entry.get("model_env_keys", []))
+    if model_override:
+        if any(model_override.startswith(p) for p in _KNOWN_PREFIXES):
+            provider, model_id = _parse_model_string(model_override)
+            record["model_string"] = model_override
+        else:
+            model_id = model_override
+            record["model_string"] = f"{provider}/{model_id}" if provider != "openai" else model_id
+
+    base_url_override = _get_first_secret(entry.get("base_url_env_keys", [])) or None
+    fallback_models = [] if model_override else entry.get("fallback_models", [])
 
     try:
         if provider == "gemini":
@@ -510,9 +715,23 @@ def query_model(
                 model_id, api_key, system_prompt, prompt, temperature, max_tokens
             )
         else:
-            record["response"] = _call_openai_compat(
-                model_id, provider, api_key, system_prompt, prompt, temperature, max_tokens
+            response_text, resolved_model_id = _call_openai_compat(
+                model_id,
+                provider,
+                api_key,
+                system_prompt,
+                prompt,
+                temperature,
+                max_tokens,
+                base_url_override=base_url_override,
+                fallback_models=fallback_models,
+                return_model_id=True,
             )
+            record["response"] = response_text
+            if resolved_model_id and resolved_model_id != model_id:
+                record["model_string"] = (
+                    f"{provider}/{resolved_model_id}" if provider != "openai" else resolved_model_id
+                )
         if record["response"]:
             record["response"] = _normalize_markdown_table(record["response"])
     except Exception as exc:  # noqa: BLE001 -- capture ANY provider error

@@ -21,10 +21,18 @@ and score them on a held-out set.
 
 ## Running the web interface locally
 
+Quick start (using the local virtual environment):
+
+```bash
+source .venv/bin/activate && streamlit run app.py
+```
+
+Or if setting up from scratch:
+
 ```bash
 pip install -r requirements.txt
 cp .env.example .env   # then fill in your API keys
-streamlit run app.py
+source .venv/bin/activate && streamlit run app.py
 ```
 
 This opens a browser tab at `http://localhost:8501`. Your professor picks
@@ -42,6 +50,8 @@ response side by side -- no terminal, no code.
    (same variable names as `.env.example`):
    ```
    MISTRAL_API_KEY = "your-key-here"
+   SWISS_AI_API_KEY = "your-key-here"
+   HF_TOKEN = "your-token-here"
    TOGETHER_API_KEY = "your-key-here"
    GEMINI_API_KEY = "your-key-here"
    ```
@@ -71,6 +81,8 @@ especially if you share the link widely.
 
 3. Get your API keys:
    - Mistral: https://console.mistral.ai
+   - Swiss AI Apertus (EPFL / ETH Zurich, via Public AI or CSCS): https://publicai.co (`SWISS_AI_API_KEY`, or `APERTUS_API_KEY` / `PUBLICAI_API_KEY`)
+   - Hugging Face (European models: ALIA-40B / BSC & Bielik-11B / SpeakLeash): https://huggingface.co/settings/tokens (`HF_TOKEN`, or `HUGGINGFACE_API_KEY`)
    - Gemini: https://aistudio.google.com/app/apikey
    - Together AI (covers Llama, Qwen, DeepSeek, GLM, Falcon-H1): https://api.together.ai/settings/api-keys
 

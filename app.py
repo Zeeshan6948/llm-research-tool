@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+import importlib
 import os
 import sys
 from pathlib import Path
@@ -26,6 +27,13 @@ from pathlib import Path
 _scripts_dir = str(Path(__file__).parent / "scripts")
 if _scripts_dir not in sys.path:
     sys.path.insert(0, _scripts_dir)
+
+import scripts.config as _scripts_config  # noqa: E402
+import scripts.analysis as _scripts_analysis  # noqa: E402
+
+# Ensure Streamlit reruns always pick up updates to config.py / analysis.py without requiring a full restart
+importlib.reload(_scripts_config)
+importlib.reload(_scripts_analysis)
 
 from scripts.config import MODEL_SEQUENCE, MODELS  # noqa: E402
 from scripts.dispatch import run_dispatch, run_dispatch_both  # noqa: E402
@@ -184,11 +192,33 @@ st.markdown(
     footer {
         visibility: hidden !important;
     }
-    /* Frosted glass blur backdrop for the Purpose of Study modal */
+    /* Full-screen opaque backdrop for the Purpose of Study modal so nothing behind it is visible */
+    div[data-testid="stDialog"],
+    .stDialog,
+    div[data-testid="stModal"] {
+        background: linear-gradient(135deg, #EFF6FF 0%, #DBEAFE 50%, #BFDBFE 100%) !important;
+        background-color: #EFF6FF !important;
+        opacity: 1 !important;
+        z-index: 999999 !important;
+    }
+    div[data-testid="stDialog"] > div:first-child,
+    .stDialog > div:first-child,
     div[data-testid="stModal"] > div:first-child {
-        backdrop-filter: blur(8px) !important;
-        -webkit-backdrop-filter: blur(8px) !important;
-        background-color: rgba(15, 23, 42, 0.55) !important;
+        background: linear-gradient(135deg, #EFF6FF 0%, #DBEAFE 50%, #BFDBFE 100%) !important;
+        background-color: #EFF6FF !important;
+        opacity: 1 !important;
+    }
+    div[data-testid="stDialog"] [role="dialog"],
+    .stDialog [role="dialog"] {
+        background-color: #FFFFFF !important;
+        border: 1px solid #BFDBFE !important;
+        box-shadow: 0 20px 50px rgba(30, 58, 138, 0.18) !important;
+    }
+    /* Completely hide background app content & sidebar while the dialog modal is open */
+    body:has(div[data-testid="stDialog"]) section[data-testid="stSidebar"],
+    body:has(div[data-testid="stDialog"]) [data-testid="stMainBlockContainer"],
+    body:has(div[data-testid="stDialog"]) header[data-testid="stHeader"] {
+        visibility: hidden !important;
     }
     </style>
     """,
@@ -201,27 +231,33 @@ def show_study_intro():
     st.markdown(
         """
         ### 🌍 Cross-Cultural Exploitative Leadership Bias Study
-        This research platform investigates how Large Language Models (LLMs) developed across different cultural and geopolitical regions (**Western/US**, **China**, and **Europe**) perceive, evaluate, and score **exploitative leadership behaviors** in workplace communication.
+        This research platform investigates how Large Language Models (LLMs) developed across different cultural and geopolitical regions (**Western/US**, **China**, and **Europe**) perceive, evaluate, and score **exploitative leadership behaviors** in workplace communication, and how **in-context expert calibration (Leave-One-Out training)** aligns model evaluations with human expert consensus.
 
-        All models evaluate the exact same workplace scenario using a standardized 15-item psychometric scale grouped into **5 core behavioral dimensions**:
-        1. **Genuine Egoistic Behaviors** — Prioritizing personal goals and self-benefit over employee needs.
-        2. **Taking Credit** — Claiming recognition or ownership of subordinates' work.
-        3. **Exerting Pressure** — Coercion, unreasonable workload increases, or aggressive demands.
-        4. **Undermining Development** — Assigning routine/tedious work and blocking professional growth.
-        5. **Manipulating** — Deception, emotional guilt-tripping, or playing colleagues against each other.
+        All models evaluate workplace communication using a standardized **15-item psychometric scale (Q1–Q15, Likert 1–5)** grouped into **5 core behavioral dimensions**:
+        1. **Genuine Egoistic Behaviors** *(Q1–Q3)* — Prioritizing personal goals and self-benefit over employee needs.
+        2. **Exerting Pressure** *(Q4–Q6)* — Coercion, unreasonable workload increases, or aggressive demands.
+        3. **Undermining Development** *(Q7–Q9)* — Assigning routine/tedious work and blocking professional growth.
+        4. **Taking Credit** *(Q10–Q12)* — Claiming recognition or ownership of subordinates' work.
+        5. **Manipulating** *(Q13–Q15)* — Deception, emotional guilt-tripping, or playing colleagues against each other.
 
         ---
 
         ### 🚀 How to Use This Application
-        1. **Select LLMs (Left Sidebar):** Choose which models and cultural clusters you want to compare (each entry displays the **exact LLM version** and **provider/company**).
-        2. **Review or Customize Prompts:** The **System Prompt** enforces the 5-dimension evaluation rubric. Enter any workplace email or leadership scenario into the **Write Your message to be evaluted by LLMs** box below it.
-        3. **Run the Evaluation:** Click the **Run** button to query all selected models in parallel.
-        4. **Analyze Visual & Tabular Results:**
-           - **📊 5-Dimension Behavioral Analysis & Graphs:** Compare scores via **Cultural Comparison**, **Overall Comparison**, **Dimension Comparison** (including **Dimension Heatmap**), and **Dimension Scores Table**. Hover over bars/cells to inspect exact textual evidence cited by each model.
-           - **📋 Results Overview:** View and export the structured dataset (CSV or JSONL) with exact model versions, companies, and regions.
-           - **📄 Model Responses:** Expand individual cards at the bottom to inspect any model's complete raw markdown tables.
+        1. **Choose an Execution Mode (Left Sidebar, under the Logo):**
+           - **Baseline LLMs:** Evaluates the message using only the baseline rubric without prior expert benchmark examples.
+           - **Expert Augmented LLMs:** Calibrates the LLMs by injecting validated expert benchmark ratings into the system prompt using a **Leave-One-Out** strategy (when `Email N` is selected, expert ratings from the other **8 scenarios** are injected into the system prompt while `Email N` is evaluated).
+           - **Both Above:** Runs both **Baseline LLMs** and **Expert Augmented LLMs** side-by-side to measure how expert calibration shifts each model toward the human expert benchmark.
+        2. **Select LLMs (Left Sidebar):** Choose which models and cultural clusters (**Western/US**, **China**, **Europe**) you want to compare.
+        3. **Select a Scenario or Write a Custom Message:**
+           - In **Expert Augmented LLMs** or **Both Above** mode, click **`Email 1`–`Email 9`** to lock in one of the 9 benchmark workplace emails, or click **`✏️ Custom`** (or leave unselected) to write your own custom message in the **"Write Your message to be evaluted by LLMs"** box.
+        4. **Run & Explore the Results Hierarchy:**
+           - **🌍 1) Cultural Comparison:** Compare average dimension scores across cultural regions (**Western/US**, **China**, **Europe**).
+           - **📈 2) Overall Comparison:** Compare each model's total exploitative severity score across all 15 scale items (out of 75).
+           - **📊 3) Dimension Comparison:** Inspect per-model 5-dimension bar charts, panel consensus rankings, and the **🗺️ Dimension Heatmap** matrix inside the same tab.
+           - **📋 4) Dimension Scores Table:** View and download (CSV) the full table of Q1–Q15 item scores, total scores, and 5-dimension decimal scores.
+           - **⚖️ Untrained vs. Trained (Leave-One-Out) vs. Expert Benchmark** *(shown in **Both Above** mode)*: Compare Baseline vs. Expert Augmented scores directly against the validated **Expert Consensus Benchmark**.
 
-        *Click the **✕** button in the top-right corner of this window (or the button below) to view the application.*
+        *Click the **✕** button in the top-right corner of this window (or the button below) to open the application.*
         """
     )
     if st.button("Start Exploring the Application", type="primary", use_container_width=True):
@@ -257,6 +293,26 @@ def get_cached_benchmark_dataset():
 benchmark_dataset = get_cached_benchmark_dataset()
 
 # ---------------------------------------------------------------- sidebar --
+st.sidebar.subheader("Execution Mode")
+
+MODE_UNTRAINED = "Baseline LLMs"
+MODE_TRAINED = "Expert Augmented LLMs"
+MODE_BOTH = "Both Above"
+
+execution_mode = st.sidebar.radio(
+    "Evaluation strategy:",
+    options=[MODE_UNTRAINED, MODE_TRAINED, MODE_BOTH],
+    index=0,
+    key="execution_mode_radio",
+    help=(
+        "• Baseline LLMs: Baseline prompt without prior expert examples.\n"
+        "• Expert Augmented LLMs: Leave-One-Out injection of the 8 other workplace scenarios' "
+        "validated 15-item expert ratings into the system prompt.\n"
+        "• Both Above: Runs Baseline LLMs and Expert Augmented LLMs side-by-side for direct comparison."
+    ),
+)
+
+st.sidebar.divider()
 st.sidebar.header("Models")
 
 regions = {}
@@ -272,26 +328,6 @@ for region, keys in regions.items():
         label = f"{exact_model} — {entry['company']}"
         if st.sidebar.checkbox(label, value=True, key=f"chk_{key}"):
             selected_models.append(key)
-
-st.sidebar.divider()
-st.sidebar.subheader("Execution Mode")
-
-MODE_UNTRAINED = "Untrained (Zero-Shot)"
-MODE_TRAINED = "Trained (In-Context / Few-Shot)"
-MODE_BOTH = "Both (Trained & Untrained Comparison)"
-
-execution_mode = st.sidebar.radio(
-    "Evaluation strategy:",
-    options=[MODE_UNTRAINED, MODE_TRAINED, MODE_BOTH],
-    index=0,
-    key="execution_mode_radio",
-    help=(
-        "• Untrained (Zero-Shot): Baseline prompt without prior expert examples.\n"
-        "• Trained (In-Context / Few-Shot): Leave-One-Out injection of the 8 other workplace emails "
-        "and their validated 15-item expert ratings into the system prompt.\n"
-        "• Both: Runs Untrained and Trained side-by-side for direct comparative evaluation."
-    ),
-)
 
 st.sidebar.divider()
 temperature = 0.3
@@ -716,7 +752,8 @@ if st.session_state.results:
             with tab_table:
                 st.markdown("##### 15-Item Response Scores & Dimension Analysis")
                 st.caption("Question responses (Q1–Q15), Total Score (out of 75), and converted 5-dimension decimal scores.")
-                st.dataframe(filtered_wide_df, use_container_width=True)
+                dim_table_height = min(max(520, (len(filtered_wide_df) + 1) * 38 + 20), 980)
+                st.dataframe(filtered_wide_df, use_container_width=True, height=dim_table_height)
                 csv_data = filtered_wide_df.to_csv(index=False)
                 st.download_button(
                     "Download 15-Item Scores (CSV)",
@@ -761,9 +798,11 @@ if st.session_state.results:
     if "execution_mode" not in df.columns:
         df["execution_mode"] = "Untrained"
     overview_cols = ["model_key", "model_version", "company", "region", "execution_mode", "response", "error"]
+    overview_table_height = min(max(520, (len(df) + 1) * 38 + 20), 980)
     st.dataframe(
         df[[c for c in overview_cols if c in df.columns]],
         use_container_width=True,
+        height=overview_table_height,
     )
 
     jsonl_data = "\n".join(json.dumps(r, ensure_ascii=False) for r in st.session_state.results)

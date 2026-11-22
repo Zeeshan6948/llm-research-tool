@@ -30,6 +30,9 @@ MODEL_SEQUENCE = [
     "llama",
     "glm",
     "kimi",
+    "apertus",
+    "alia",
+    "bielik",
 ]
 
 MODELS = {
@@ -104,5 +107,47 @@ MODELS = {
         "model": "together_ai/moonshotai/Kimi-K3",
         "env_key": "TOGETHER_API_KEY",
         "trainable": False,
+    },
+    "apertus": {
+        "region": "Europe (non-US)",
+        "company": "Swiss AI (EPFL / ETH Zurich)",
+        "model": "publicai/swiss-ai/apertus-v1.5-70b",
+        "env_key": "SWISS_AI_API_KEY",
+        "env_key_aliases": ["APERTUS_API_KEY", "PUBLICAI_API_KEY"],
+        "base_url_env_keys": ["SWISS_AI_BASE_URL", "APERTUS_BASE_URL", "PUBLICAI_BASE_URL"],
+        "model_env_keys": ["SWISS_AI_MODEL", "APERTUS_MODEL"],
+        "fallback_models": [
+            "swiss-ai/apertus-70b-instruct",
+            "swiss-ai/Apertus-70B-Instruct-2509",
+            "swiss-ai/apertus-v1.5-8b",
+            "swiss-ai/apertus-8b-instruct",
+        ],
+        "trainable": True,
+    },
+    # Note: utter-project/EuroLLM-22B-Instruct-2512 currently has no live serverless
+    # provider on Hugging Face Inference Providers. ALIA-40B (Spain / EU) and
+    # Bielik-11B (Poland / EU) are live sovereign European alternatives via HF_TOKEN.
+    "alia": {
+        "region": "Europe (non-US)",
+        "company": "Barcelona Supercomputing Center (via Hugging Face)",
+        "model": "huggingface/BSC-LT/ALIA-40b-instruct-2606",
+        "env_key": "HF_TOKEN",
+        "env_key_aliases": ["HUGGINGFACE_API_KEY", "HUGGINGFACEHUB_API_TOKEN"],
+        "base_url_env_keys": ["ALIA_BASE_URL", "HF_BASE_URL"],
+        "model_env_keys": ["ALIA_MODEL"],
+        "fallback_models": [
+            "BSC-LT/ALIA-40b-instruct",
+        ],
+        "trainable": True,
+    },
+    "bielik": {
+        "region": "Europe (non-US)",
+        "company": "SpeakLeash / Poland (via Hugging Face)",
+        "model": "huggingface/speakleash/Bielik-11B-v3.0-Instruct",
+        "env_key": "HF_TOKEN",
+        "env_key_aliases": ["HUGGINGFACE_API_KEY", "HUGGINGFACEHUB_API_TOKEN"],
+        "base_url_env_keys": ["BIELIK_BASE_URL", "HF_BASE_URL"],
+        "model_env_keys": ["BIELIK_MODEL"],
+        "trainable": True,
     },
 }
